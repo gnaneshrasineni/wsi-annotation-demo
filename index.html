@@ -2,6 +2,8 @@
     <head>
         <title>Whole Slide Image Annotation</title>
         
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
         <link rel="stylesheet" href="node_modules/@recogito/annotorious/dist/annotorious.min.css">
         <link rel="stylesheet" href="node_modules/@recogito/annotorious-selector-pack/dist/annotorious-selector-pack.min.css">
         
@@ -12,21 +14,28 @@
         <script src="https://cdn.jsdelivr.net/npm/@recogito/annotorious-selector-pack@0.6.0/dist/annotorious-selector-pack.min.js"></script>
     </head>
     <body>
-        <div style="padding: 0 0em; height: 95%; background: #303030">
+        <div style="padding: 0 0em; height: 100%; background: #303030">
             <div class="sidebar-left" style="float: left; width: 10%;">
-                <h1 style="color: white; font-size: 16; padding: 0 1.5em;">Whole Slide Image Annotation Demo</h1>
+                <h1 style="color: white; font-size: 16px; padding: 0 1.5em;">Whole Slide Image Annotation Demo</h1>
 
-                <hr style="border: 1px solid white;">
+                <hr style="border: 2px solid white;">
 
-                <div class="position"></div>
-                <div class="zoom" style="margin-top: 3em;"></div>
+                <div id="annotations-container">
+                    <h2 style="color: white; padding: 0 0.5em; font-size: 14px;">Annotations</h2>
+                    <hr style="border: 0.25px solid white;">
+                    <div id="annotations-list"></div>
+                </div>
             </div>
             <div id="wsi-canvas" style="float: left; width: 80%; height: 100%; background: white;"></div>
             <div id="annotation-toolbar"></div>
 
             <div class="sidebar-right" style="float: right; width: 10%;">
-                <div class="position"></div>
-                <div class="zoom" style="margin-top: 3em;"></div>
+                <h2 style="color: white; padding: 0 0.5em; font-size: 14px;">Info</h2>
+                <hr style="border: 0.25px solid white;">
+
+                <div class="position" style="color: white; padding: 0 0.5em; font-size: 14px;"></div>
+                <hr style="border: 0.25px solid white;">
+                <div class="zoom" style="color: white; padding: 0 0.5em; font-size: 14px;"></div>
             </div>
             
             <div id="annotation_list" style="display: none;"></div>
@@ -69,6 +78,101 @@
 
             document.getElementById('annotation-toolbar').addEventListener('click', function(event) {
                 event.preventDefault();
+            });
+
+            // Listen for annotation creation event
+            anno.on('createAnnotation', function(annotation) {
+                // Create a new div element for the annotation
+                var annotationItem = document.createElement('div');
+                annotationItem.className = 'annotation-item';
+                annotationItem.style.color = 'white';
+                annotationItem.style.padding = '10px';
+                annotationItem.style.border = '1px solid white';
+                annotationItem.style.marginTop = '10px';
+                annotationItem.style.cursor = 'pointer';
+                annotationItem.style.fontSize = '12px'; // Set font size in pixels
+                annotationItem.dataset.annotationId = annotation.id;
+
+                // Add annotation details to the item
+                annotationItem.innerHTML = `
+                    ${annotation.body[0].value}
+                `;
+
+                // Add click event to make the annotation active
+                annotationItem.addEventListener('click', function() {
+                    anno.selectAnnotation(annotation.id);
+                });
+
+                // Append the annotation item to the annotations list in the sidebar
+                document.getElementById('annotations-list').appendChild(annotationItem);
+            });
+
+            // Listen for annotation deletion event
+            anno.on('deleteAnnotation', function(annotation) {
+                // Find the corresponding annotation item in the sidebar
+                var annotationItems = document.querySelectorAll('.annotation-item');
+                annotationItems.forEach(function(item) {
+                    if (item.dataset.annotationId === annotation.id) {
+                        item.remove();
+                    }
+                });
+            });
+
+            // Disable panning when polygon tool is active
+            anno.on('startSelection', function(event) {
+                if (event.tool === 'polygon') {
+                    viewer.setMouseNavEnabled(false);
+                }
+            });
+
+            // Re-enable panning when polygon tool is deactivated
+            anno.on('cancelSelection', function(event) {
+                if (event.tool === 'polygon') {
+                    viewer.setMouseNavEnabled(true);
+                }
+            });
+
+            anno.on('createAnnotation', function(event) {
+                if (event.tool === 'polygon') {
+                    viewer.setMouseNavEnabled(true);
+                }
+            });
+            
+            // Add a listener to the viewer to update the position and zoom info
+            var positionEl = document.querySelectorAll('.sidebar-right .position')[0];
+            var zoomEl = document.querySelectorAll('.sidebar-right .zoom')[0];
+            
+            // Default values
+            positionEl.innerHTML = 'Web:<br> (NA) <br><br>Viewport:<br> (NA) <br><br>Image:<br> (NA)';
+            zoomEl.innerHTML = 'Zoom:<br> NA <br><br>Image Zoom:<br> NA';
+
+            var updateZoom = function() {
+                var zoom = viewer.viewport.getZoom(true);
+                var imageZoom = viewer.viewport.viewportToImageZoom(zoom);
+
+                zoomEl.innerHTML = 'Zoom:<br>' + (Math.round(zoom * 100) / 100) + 
+                    '<br><br>Image Zoom:<br>' + (Math.round(imageZoom * 100) / 100);
+            }
+
+            viewer.addHandler('open', function() {
+                var tracker = new OpenSeadragon.MouseTracker({
+                    element: viewer.container,
+                    moveHandler: function(event) {
+                        var webPoint = event.position;
+                        var viewportPoint = viewer.viewport.pointFromPixel(webPoint);
+                        var imagePoint = viewer.viewport.viewportToImageCoordinates(viewportPoint);
+                        var zoom = viewer.viewport.getZoom(true);
+                        var imageZoom = viewer.viewport.viewportToImageZoom(zoom);
+
+                        positionEl.innerHTML = 'Web:<br>' + webPoint.toString() + 
+                            '<br><br>Viewport:<br>' + viewportPoint.toString() +
+                            '<br><br>Image:<br>' + imagePoint.toString();
+                        
+                        updateZoom();     
+                    }
+                });
+                tracker.setTracking(true);  
+                viewer.addHandler('animation', updateZoom);   
             });
         </script>
     </body>
