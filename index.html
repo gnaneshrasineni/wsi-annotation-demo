@@ -30,8 +30,12 @@
             <div id="annotation-toolbar"></div>
 
             <div class="sidebar-right" style="float: right; width: 10%;">
-                <div class="position"></div>
-                <div class="zoom" style="margin-top: 3em;"></div>
+                <h2 style="color: white; padding: 0 0.5em; font-size: 14px;">Info</h2>
+                <hr style="border: 0.25px solid white;">
+
+                <div class="position" style="color: white; padding: 0 0.5em; font-size: 14px;"></div>
+                <hr style="border: 0.25px solid white;">
+                <div class="zoom" style="color: white; padding: 0 0.5em; font-size: 14px;"></div>
             </div>
             
             <div id="annotation_list" style="display: none;"></div>
@@ -132,6 +136,43 @@
                 if (event.tool === 'polygon') {
                     viewer.setMouseNavEnabled(true);
                 }
+            });
+            
+            // Add a listener to the viewer to update the position and zoom info
+            var positionEl = document.querySelectorAll('.sidebar-right .position')[0];
+            var zoomEl = document.querySelectorAll('.sidebar-right .zoom')[0];
+            
+            // Default values
+            positionEl.innerHTML = 'Web:<br> (NA) <br><br>Viewport:<br> (NA) <br><br>Image:<br> (NA)';
+            zoomEl.innerHTML = 'Zoom:<br> NA <br><br>Image Zoom:<br> NA';
+
+            var updateZoom = function() {
+                var zoom = viewer.viewport.getZoom(true);
+                var imageZoom = viewer.viewport.viewportToImageZoom(zoom);
+
+                zoomEl.innerHTML = 'Zoom:<br>' + (Math.round(zoom * 100) / 100) + 
+                    '<br><br>Image Zoom:<br>' + (Math.round(imageZoom * 100) / 100);
+            }
+
+            viewer.addHandler('open', function() {
+                var tracker = new OpenSeadragon.MouseTracker({
+                    element: viewer.container,
+                    moveHandler: function(event) {
+                        var webPoint = event.position;
+                        var viewportPoint = viewer.viewport.pointFromPixel(webPoint);
+                        var imagePoint = viewer.viewport.viewportToImageCoordinates(viewportPoint);
+                        var zoom = viewer.viewport.getZoom(true);
+                        var imageZoom = viewer.viewport.viewportToImageZoom(zoom);
+
+                        positionEl.innerHTML = 'Web:<br>' + webPoint.toString() + 
+                            '<br><br>Viewport:<br>' + viewportPoint.toString() +
+                            '<br><br>Image:<br>' + imagePoint.toString();
+                        
+                        updateZoom();     
+                    }
+                });
+                tracker.setTracking(true);  
+                viewer.addHandler('animation', updateZoom);   
             });
         </script>
     </body>
