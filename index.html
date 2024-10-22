@@ -12,6 +12,16 @@
         <script src="node_modules/@recogito/annotorious-openseadragon/dist/openseadragon-annotorious.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/@recogito/annotorious-toolbar@1.1.0/dist/annotorious-toolbar.min.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/@recogito/annotorious-selector-pack@0.6.0/dist/annotorious-selector-pack.min.js"></script>
+
+        <style>
+            /** New style for the annotation outlines **/
+            svg.a9s-annotationlayer .a9s-selection .a9s-inner,
+            svg.a9s-annotationlayer .a9s-annotation .a9s-inner  {
+                stroke-width:4;
+                stroke:blue;
+                fill: rgba(0, 0, 255, 0.4);
+            }
+        </style>
     </head>
     <body>
         <div style="padding: 0 0em; height: 100%; background: #303030">
