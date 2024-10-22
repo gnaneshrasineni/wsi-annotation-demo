@@ -23,7 +23,7 @@ This repository was developed to demonstrate how to do the following:
 
 To access the live demo, click on the `Hugging Face` badge above. Below is a snapshot of the current state of the demo app.
 
-<img width="1400" alt="demo-hf-spaces" src="X">
+<img width="1400" alt="demo-hf-spaces" src="https://github.com/user-attachments/assets/00d0e476-7e2f-4173-9e9d-088732103bbd">
 
 ## Stack
 
