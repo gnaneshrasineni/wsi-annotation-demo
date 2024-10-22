@@ -113,6 +113,26 @@
                     }
                 });
             });
+
+            // Disable panning when polygon tool is active
+            anno.on('startSelection', function(event) {
+                if (event.tool === 'polygon') {
+                    viewer.setMouseNavEnabled(false);
+                }
+            });
+
+            // Re-enable panning when polygon tool is deactivated
+            anno.on('cancelSelection', function(event) {
+                if (event.tool === 'polygon') {
+                    viewer.setMouseNavEnabled(true);
+                }
+            });
+
+            anno.on('createAnnotation', function(event) {
+                if (event.tool === 'polygon') {
+                    viewer.setMouseNavEnabled(true);
+                }
+            });
         </script>
     </body>
 </html>
