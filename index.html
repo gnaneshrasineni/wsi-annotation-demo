@@ -1,0 +1,75 @@
+<html>
+    <head>
+        <title>Whole Slide Image Annotation</title>
+        
+        <link rel="stylesheet" href="node_modules/@recogito/annotorious/dist/annotorious.min.css">
+        <link rel="stylesheet" href="node_modules/@recogito/annotorious-selector-pack/dist/annotorious-selector-pack.min.css">
+        
+        <!-- Dependencies -->
+        <script src="node_modules/openseadragon/build/openseadragon/openseadragon.min.js"></script>
+        <script src="node_modules/@recogito/annotorious-openseadragon/dist/openseadragon-annotorious.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/@recogito/annotorious-toolbar@1.1.0/dist/annotorious-toolbar.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/@recogito/annotorious-selector-pack@0.6.0/dist/annotorious-selector-pack.min.js"></script>
+    </head>
+    <body>
+        <div style="padding: 0 0em; height: 95%; background: #303030">
+            <div class="sidebar-left" style="float: left; width: 10%;">
+                <h1 style="color: white; font-size: 16; padding: 0 1.5em;">Whole Slide Image Annotation Demo</h1>
+
+                <hr style="border: 1px solid white;">
+
+                <div class="position"></div>
+                <div class="zoom" style="margin-top: 3em;"></div>
+            </div>
+            <div id="wsi-canvas" style="float: left; width: 80%; height: 100%; background: white;"></div>
+            <div id="annotation-toolbar"></div>
+
+            <div class="sidebar-right" style="float: right; width: 10%;">
+                <div class="position"></div>
+                <div class="zoom" style="margin-top: 3em;"></div>
+            </div>
+            
+            <div id="annotation_list" style="display: none;"></div>
+        </div>
+        <link rel="stylesheet" href="annotorious.min.css">
+        <script type="text/javascript">
+            var viewer = OpenSeadragon({
+                id: "wsi-canvas",
+                prefixUrl: "node_modules/openseadragon/build/openseadragon/images/",
+                zoomPerScroll: 2,
+                zoomPerClick: 1,
+                showNavigator:  true,
+                showHomeControl: false,
+                showFullPageControl: false,
+                showZoomControl: false,
+                minZoomLevel: 0.25,
+                maxZoomLevel: 40,
+                tileSources: {
+                    Image: {
+                        xmlns: "http://schemas.microsoft.com/deepzoom/2008",
+                        Url: "A05_files/",
+                        Format: "jpeg",
+                        Overlap: "0",
+                        TileSize: "256",
+                        Size: {
+                            Height: 42625,
+                            Width: 51553
+                        }
+                    },
+                    overlays: [],
+                },
+            });
+            viewer.innerTracker.keyHandler = null;
+
+            var anno = OpenSeadragon.Annotorious(viewer);
+            Annotorious.SelectorPack(anno);
+
+            const toolbar = new Annotorious.Toolbar(anno, document.getElementById('annotation-toolbar'));
+            viewer.addControl(document.getElementById("annotation-toolbar"), {anchor: OpenSeadragon.ControlAnchor.TOP_LEFT});
+
+            document.getElementById('annotation-toolbar').addEventListener('click', function(event) {
+                event.preventDefault();
+            });
+        </script>
+    </body>
+</html>
