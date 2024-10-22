@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "@annotorious/annotorious": "^3.0.11",
+    "@annotorious/selector-pack": "^0.6.0",
+    "@recogito/annotorious-openseadragon": "^2.7.16",
+    "@recogito/annotorious-toolbar": "^1.1.0"
+  }
+}

@@ -1,0 +1,4 @@
+*.DS_Store
+*node_modules/
+*.jpeg
+*A05_files/
