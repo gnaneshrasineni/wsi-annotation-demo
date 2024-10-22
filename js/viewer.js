@@ -12,7 +12,7 @@ var viewer = OpenSeadragon({
     tileSources: {
         Image: {
             xmlns: "http://schemas.microsoft.com/deepzoom/2008",
-            Url: "../A05_files/",
+            Url: "./A05_files/",
             Format: "jpeg",
             Overlap: "0",
             TileSize: "256",
