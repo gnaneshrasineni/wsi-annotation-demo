@@ -1,0 +1,75 @@
+body {
+    padding: 0 0em;
+    height: 100%;
+    background: #303030;
+}
+
+.sidebar-left {
+    float: left;
+    width: 10%;
+}
+
+.sidebar-left h1 {
+    color: white;
+    font-size: 16px;
+    padding: 0 1.5em;
+}
+
+.sidebar-left hr {
+    border: 2px solid white;
+}
+
+#annotations-container h2 {
+    color: white;
+    padding: 0 0.5em;
+    font-size: 14px;
+}
+
+#annotations-container hr {
+    border: 0.25px solid white;
+}
+
+#wsi-canvas {
+    float: left;
+    width: 80%;
+    height: 100%;
+    background: white;
+}
+
+.sidebar-right {
+    float: right;
+    width: 10%;
+}
+
+.sidebar-right h2 {
+    color: white;
+    padding: 0 0.5em;
+    font-size: 14px;
+}
+
+.sidebar-right hr {
+    border: 0.25px solid white;
+}
+
+.sidebar-right .position,
+.sidebar-right .zoom {
+    color: white;
+    padding: 0 0.5em;
+    font-size: 14px;
+}
+
+.annotation-item {
+    color: white;
+    padding: 10px;
+    border: 1px solid white;
+    margin-top: 10px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+svg.a9s-annotationlayer .a9s-selection .a9s-inner,
+svg.a9s-annotationlayer .a9s-annotation .a9s-inner {
+    stroke-width: 4;
+    stroke: blue;
+    fill: rgba(0, 0, 255, 0.4);
+}
