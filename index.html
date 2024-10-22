@@ -2,6 +2,8 @@
     <head>
         <title>Whole Slide Image Annotation</title>
         
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
         <link rel="stylesheet" href="node_modules/@recogito/annotorious/dist/annotorious.min.css">
         <link rel="stylesheet" href="node_modules/@recogito/annotorious-selector-pack/dist/annotorious-selector-pack.min.css">
         
@@ -14,12 +16,15 @@
     <body>
         <div style="padding: 0 0em; height: 95%; background: #303030">
             <div class="sidebar-left" style="float: left; width: 10%;">
-                <h1 style="color: white; font-size: 16; padding: 0 1.5em;">Whole Slide Image Annotation Demo</h1>
+                <h1 style="color: white; font-size: 16px; padding: 0 1.5em;">Whole Slide Image Annotation Demo</h1>
 
-                <hr style="border: 1px solid white;">
+                <hr style="border: 2px solid white;">
 
-                <div class="position"></div>
-                <div class="zoom" style="margin-top: 3em;"></div>
+                <div id="annotations-container">
+                    <h2 style="color: white; padding: 0 0.5em; font-size: 14px;">Annotations</h2>
+                    <hr style="border: 0.25px solid white;">
+                    <div id="annotations-list"></div>
+                </div>
             </div>
             <div id="wsi-canvas" style="float: left; width: 80%; height: 100%; background: white;"></div>
             <div id="annotation-toolbar"></div>
@@ -69,6 +74,44 @@
 
             document.getElementById('annotation-toolbar').addEventListener('click', function(event) {
                 event.preventDefault();
+            });
+
+            // Listen for annotation creation event
+            anno.on('createAnnotation', function(annotation) {
+                // Create a new div element for the annotation
+                var annotationItem = document.createElement('div');
+                annotationItem.className = 'annotation-item';
+                annotationItem.style.color = 'white';
+                annotationItem.style.padding = '10px';
+                annotationItem.style.border = '1px solid white';
+                annotationItem.style.marginTop = '10px';
+                annotationItem.style.cursor = 'pointer';
+                annotationItem.style.fontSize = '12px'; // Set font size in pixels
+                annotationItem.dataset.annotationId = annotation.id;
+
+                // Add annotation details to the item
+                annotationItem.innerHTML = `
+                    ${annotation.body[0].value}
+                `;
+
+                // Add click event to make the annotation active
+                annotationItem.addEventListener('click', function() {
+                    anno.selectAnnotation(annotation.id);
+                });
+
+                // Append the annotation item to the annotations list in the sidebar
+                document.getElementById('annotations-list').appendChild(annotationItem);
+            });
+
+            // Listen for annotation deletion event
+            anno.on('deleteAnnotation', function(annotation) {
+                // Find the corresponding annotation item in the sidebar
+                var annotationItems = document.querySelectorAll('.annotation-item');
+                annotationItems.forEach(function(item) {
+                    if (item.dataset.annotationId === annotation.id) {
+                        item.remove();
+                    }
+                });
             });
         </script>
     </body>
