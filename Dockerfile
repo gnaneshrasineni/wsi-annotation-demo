@@ -12,6 +12,8 @@ WORKDIR /app
 # Copy relevant files from repo for configuration and deployment
 COPY index.html /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/nginx.conf
+COPY css/ /usr/share/nginx/html/css/
+COPY js/ /usr/share/nginx/html/js/
 COPY package.json /app/package.json
 
 # Download and uncompress test data
