@@ -1,6 +1,6 @@
 var viewer = OpenSeadragon({
     id: "wsi-canvas",
-    prefixUrl: "../node_modules/openseadragon/build/openseadragon/images/",
+    prefixUrl: "./node_modules/openseadragon/build/openseadragon/images/",
     zoomPerScroll: 2,
     zoomPerClick: 1,
     showNavigator: true,
