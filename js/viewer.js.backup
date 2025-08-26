@@ -1,0 +1,3085 @@
+var viewer;
+var anno;
+var currentTool = 'circle';
+var currentPolarity = null;
+var currentTab = 'manual';
+var annotations = {
+    manual: [],
+    sam: []
+};
+var wsi_height;
+var wsi_width;
+
+// SAM integration variables
+var samApiUrl = 'http://localhost:3000/api/sam';
+var samConnected = false;
+var samLiveMode = true;
+
+// Tool mapping
+const toolMapping = {
+    'circle': 'manual',
+    'freehand': 'manual',
+    'rect': 'manual',
+    'polygon': 'manual',
+    'quadrilateral': 'manual',
+    'point': 'manual',
+    'scribble': 'manual',
+    'sam-point': 'sam',
+    'sam-rect': 'sam'
+};
+
+// Default tool configuration for each tab
+const tabDefaults = {
+    'manual': { tool: 'circle', polarity: null },
+    'sam': { tool: 'sam-point', polarity: null }
+};
+
+// Tab navigation state
+let currentTabIndex = 0;
+const maxVisibleTabs = 2;
+
+// Quadrilateral tracking
+let quadrilateralMode = false;
+let polygonVertexCount = 0;
+let polygonObserver = null;
+
+// Quadrilateral tracking functions
+function startQuadrilateralTracking() {
+    if (!quadrilateralMode) return;
+    
+    polygonObserver = new MutationObserver(function(mutations) {
+        if (!quadrilateralMode || currentTool !== 'quadrilateral') {
+            return;
+        }
+        
+        // Check for polygon handles (vertices)
+        const handles = document.querySelectorAll('.a9s-selection .a9s-handle');
+        const vertexCount = handles.length;
+        
+        console.log('Polygon vertices detected:', vertexCount);
+        
+        // Auto-complete when we have exactly 4 vertices
+        if (vertexCount === 4) {
+            console.log('4-sided polygon detected! Auto-completing...');
+            setTimeout(() => {
+                completeQuadrilateral();
+            }, 200); // Small delay to ensure polygon is stable
+        }
+    });
+
+    // Start observing the annotation layer for changes
+    const annotationLayer = document.querySelector('svg.a9s-annotationlayer');
+    if (annotationLayer) {
+        polygonObserver.observe(annotationLayer, {
+            childList: true,
+            subtree: true,
+            attributes: true
+        });
+    }
+}
+
+function stopQuadrilateralTracking() {
+    if (polygonObserver) {
+        polygonObserver.disconnect();
+        polygonObserver = null;
+    }
+}
+
+function completeQuadrilateral() {
+    try {
+        console.log('Completing quadrilateral...');
+        
+        // Method 1: Try clicking the first handle to close the polygon
+        const firstHandle = document.querySelector('.a9s-selection .a9s-handle:first-child');
+        if (firstHandle) {
+            console.log('Clicking first handle to close quadrilateral');
+            firstHandle.dispatchEvent(new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                view: window
+            }));
+            
+            // Enable mouse navigation after completion
+            setTimeout(() => {
+                viewer.setMouseNavEnabled(true);
+                quadrilateralMode = false;
+                polygonVertexCount = 0;
+            }, 200);
+            return;
+        }
+        
+        // Method 2: Send Enter key to complete
+        const enterEvent = new KeyboardEvent('keydown', {
+            key: 'Enter',
+            code: 'Enter',
+            keyCode: 13,
+            bubbles: true,
+            cancelable: true
+        });
+        document.dispatchEvent(enterEvent);
+        
+        // Method 3: Double-click the current selection to complete
+        setTimeout(() => {
+            const selectionElement = document.querySelector('.a9s-selection');
+            if (selectionElement) {
+                selectionElement.dispatchEvent(new MouseEvent('dblclick', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                }));
+            }
+            
+            // Enable mouse navigation
+            viewer.setMouseNavEnabled(true);
+            quadrilateralMode = false;
+            polygonVertexCount = 0;
+        }, 100);
+
+    } catch (error) {
+        console.error('Error completing quadrilateral:', error);
+        // Fallback: enable mouse navigation
+        viewer.setMouseNavEnabled(true);
+        quadrilateralMode = false;
+        polygonVertexCount = 0;
+    }
+}
+
+// Initialize file input
+function initializeFileInput() {
+    const fileInput = document.getElementById('file-input');
+    const browseButton = document.getElementById('browse-button');
+    const fileInfo = document.getElementById('file-info');
+
+    if (!fileInput || !browseButton) {
+        console.error('File input elements not found');
+        return;
+    }
+
+    browseButton.addEventListener('click', function(e) {
+        e.preventDefault();
+        console.log('Browse button clicked');
+        fileInput.click();
+    });
+
+    fileInput.addEventListener('change', function(event) {
+        console.log('File input changed');
+        const file = event.target.files[0];
+        if (file) {
+            console.log('File selected:', file.name);
+            loadTiffFile(file);
+            if (fileInfo) {
+                fileInfo.textContent = `Selected: ${file.name}`;
+            }
+        }
+    });
+
+    // Drag and drop functionality
+    const dropZone = document.getElementById('wsi-canvas');
+    
+    if (dropZone) {
+        dropZone.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.add('drag-over');
+        });
+
+        dropZone.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('drag-over');
+        });
+
+        dropZone.addEventListener('drop', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            dropZone.classList.remove('drag-over');
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                const file = files[0];
+                console.log('File dropped:', file.name, 'Type:', file.type);
+                
+                const fileName = file.name.toLowerCase();
+                const validExtensions = ['.tiff', '.tif', '.svs'];
+                const isValidFile = validExtensions.some(ext => fileName.endsWith(ext)) || 
+                                  file.type === 'image/tiff' || 
+                                  file.type === 'image/tif';
+                
+                if (isValidFile) {
+                    loadTiffFile(file);
+                    if (fileInfo) {
+                        fileInfo.textContent = `Selected: ${file.name}`;
+                    }
+                } else {
+                    alert('Please select a valid TIFF or SVS file.\nSupported formats: .tiff, .tif, .svs');
+                }
+            }
+        });
+    }
+
+    console.log('File input initialized successfully');
+}
+
+// Initialize tabs
+function initializeTabs() {
+    const tabItems = document.querySelectorAll('.tab-item');
+    const tabPanes = document.querySelectorAll('.tab-pane');
+    const leftArrow = document.getElementById('tab-arrow-left');
+    const rightArrow = document.getElementById('tab-arrow-right');
+
+    tabItems.forEach((item, index) => {
+        item.addEventListener('click', function() {
+            const targetTab = this.dataset.tab;
+            
+            tabItems.forEach(t => t.classList.remove('active'));
+            tabPanes.forEach(p => p.classList.remove('active'));
+            
+            this.classList.add('active');
+            document.getElementById(targetTab + '-pane').classList.add('active');
+            
+            currentTabIndex = index;
+            currentTab = targetTab;
+            updateTabNavigation();
+            
+            // Apply default configuration for the tab
+            applyTabDefaults(targetTab);
+            
+            // Update annotation visibility
+            updateAnnotationVisibility();
+        });
+    });
+
+    if (leftArrow) {
+        leftArrow.addEventListener('click', () => {
+            if (currentTabIndex > 0) {
+                tabItems[currentTabIndex - 1].click();
+            }
+        });
+    }
+
+    if (rightArrow) {
+        rightArrow.addEventListener('click', () => {
+            if (currentTabIndex < tabItems.length - 1) {
+                tabItems[currentTabIndex + 1].click();
+            }
+        });
+    }
+
+    const toolButtons = document.querySelectorAll('.tool-button');
+    toolButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const tool = this.dataset.tool;
+            setActiveTool(tool);
+        });
+    });
+
+    const polarityButtons = document.querySelectorAll('.polarity-button');
+    polarityButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const polarity = this.dataset.polarity;
+            togglePolarity(polarity, this);
+        });
+    });
+
+    updateTabNavigation();
+    
+    // Set initial tab and apply defaults
+    currentTab = 'manual';
+    applyTabDefaults('manual');
+    updateAnnotationVisibility();
+}
+
+function applyTabDefaults(tabName) {
+    const defaults = tabDefaults[tabName];
+    if (!defaults) return;
+    
+    // Set default tool
+    if (defaults.tool) {
+        setActiveTool(defaults.tool);
+    }
+    
+    // Set default polarity
+    const tabPane = document.getElementById(tabName + '-pane');
+    if (tabPane) {
+        const polarityButtons = tabPane.querySelectorAll('.polarity-button');
+        
+        // Reset all polarity buttons
+        polarityButtons.forEach(btn => btn.classList.remove('active'));
+        currentPolarity = null;
+        
+        // Set default polarity if specified
+        if (defaults.polarity) {
+            const targetPolarityBtn = tabPane.querySelector(`[data-polarity="${defaults.polarity}"]`);
+            if (targetPolarityBtn) {
+                targetPolarityBtn.classList.add('active');
+                currentPolarity = defaults.polarity;
+            }
+        }
+    }
+}
+
+function updateAnnotationVisibility() {
+    if (!anno) return;
+    
+    // Clear all visible annotations
+    anno.clearAnnotations();
+    
+    // Show annotations for current tab
+    const category = currentTab;
+    if (annotations[category]) {
+        annotations[category].forEach(annotation => {
+            anno.addAnnotation(annotation);
+        });
+    }
+}
+
+function selectFirstToolInTab(tabName) {
+    // This function is now replaced by applyTabDefaults
+    applyTabDefaults(tabName);
+}
+
+function updateTabNavigation() {
+    const tabNav = document.getElementById('tab-nav');
+    const leftArrow = document.getElementById('tab-arrow-left');
+    const rightArrow = document.getElementById('tab-arrow-right');
+    const tabItems = document.querySelectorAll('.tab-item');
+
+    if (!tabNav || !leftArrow || !rightArrow) return;
+
+    // With only 2 tabs, we don't need scrolling navigation
+    tabNav.style.transform = 'translateX(0)';
+    
+    // Disable both arrows since we only have 2 tabs
+    leftArrow.disabled = true;
+    rightArrow.disabled = true;
+    leftArrow.style.opacity = '0.3';
+    rightArrow.style.opacity = '0.3';
+}
+
+function setActiveTool(tool) {
+    currentTool = tool;
+    console.log('🛠️ Setting active tool:', tool);
+    console.log('🛠️ Tool starts with sam-?', tool.startsWith('sam-'));
+    console.log('🛠️ SAM connected?', samConnected);
+    console.log('🛠️ SAM live mode?', samLiveMode);
+    
+    // Reset quadrilateral mode for all tools except quadrilateral
+    if (tool !== 'quadrilateral') {
+        quadrilateralMode = false;
+        stopQuadrilateralTracking();
+    }
+    
+    const activePane = document.querySelector('.tab-pane.active');
+    if (activePane) {
+        activePane.querySelectorAll('.tool-button').forEach(btn => {
+            btn.classList.remove('active');
+        });
+        
+        const targetButton = activePane.querySelector(`[data-tool="${tool}"]`);
+        if (targetButton) {
+            targetButton.classList.add('active');
+        }
+    }
+
+    if (anno) {
+        // Ensure drawing is enabled
+        anno.setDrawingEnabled(true);
+        
+        try {
+            switch(tool) {
+                case 'circle':
+                    anno.setDrawingTool('circle');
+                    console.log('Set circle tool');
+                    break;
+                case 'rect':
+                    anno.setDrawingTool('rect');
+                    console.log('Set rect tool');
+                    break;
+                case 'quadrilateral':
+                    // Use polygon tool for quadrilateral
+                    anno.setDrawingTool('polygon');
+                    quadrilateralMode = true;
+                    console.log('Set quadrilateral (polygon) tool');
+                    break;
+                case 'point':
+                    anno.setDrawingTool('point');
+                    console.log('Set point tool');
+                    break;
+                case 'freehand':
+                    anno.setDrawingTool('freehand');
+                    console.log('Set freehand tool');
+                    break;
+                case 'scribble':
+                    anno.setDrawingTool('freehand');
+                    console.log('Set scribble (freehand) tool');
+                    break;
+                case 'sam-point':
+                    anno.setDrawingTool('point');
+                    console.log('Set SAM point tool');
+                    break;
+                case 'sam-rect':
+                    anno.setDrawingTool('rect');
+                    console.log('Set SAM rect tool');
+                    break;
+                default:
+                    anno.setDrawingTool(tool);
+                    console.log('Set default tool:', tool);
+            }
+            
+            // Verify the tool was set (skip API calls that may not be available)
+            setTimeout(() => {
+                console.log('Tool setting completed');
+            }, 100);
+            
+        } catch (error) {
+            console.error('Error setting drawing tool:', error);
+        }
+    } else {
+        console.warn('Annotorious not initialized yet');
+    }
+}
+
+function togglePolarity(polarity, button) {
+    const currentPolarityButtons = button.parentElement.querySelectorAll('.polarity-button');
+    
+    if (currentPolarity === polarity) {
+        currentPolarity = null;
+        button.classList.remove('active');
+    } else {
+        currentPolarityButtons.forEach(btn => btn.classList.remove('active'));
+        currentPolarity = polarity;
+        button.classList.add('active');
+    }
+}
+
+async function loadTiffFile(file) {
+    console.log('Loading TIFF file:', file.name);
+    
+    try {
+        const loadingDiv = document.getElementById('loading-indicator');
+        if (loadingDiv) {
+            loadingDiv.style.display = 'block';
+            console.log('Loading indicator shown');
+        }
+
+        if (typeof OpenSeadragon === 'undefined') {
+            throw new Error('OpenSeadragon is not loaded');
+        }
+        
+        if (typeof OpenSeadragon.GeoTIFFTileSource === 'undefined') {
+            throw new Error('GeoTIFFTileSource is not available. Make sure geotiff-tilesource is loaded.');
+        }
+
+        console.log('Getting tile sources...');
+        const tiffTileSources = await OpenSeadragon.GeoTIFFTileSource.getAllTileSources(file, {
+            logLatency: false,
+        });
+
+        console.log('Tile sources created:', tiffTileSources.length);
+
+        if (viewer) {
+            console.log('Destroying existing viewer');
+            viewer.destroy();
+        }
+
+        console.log('Creating new viewer...');
+        viewer = new OpenSeadragon.Viewer({
+            id: "wsi-canvas",
+            prefixUrl: "./node_modules/openseadragon/build/openseadragon/images/",
+            zoomPerScroll: 2,
+            zoomPerClick: 1,
+            showNavigator: true,
+            showHomeControl: false,
+            showFullPageControl: false,
+            showZoomControl: false,
+            minZoomLevel: 0.25,
+            maxZoomLevel: 40,
+            tileSources: tiffTileSources,
+            crossOriginPolicy: "Anonymous",
+            ajaxWithCredentials: false
+        });
+
+        viewer.innerTracker.keyHandler = null;
+
+        const fileBrowser = document.getElementById('file-browser');
+        if (fileBrowser) {
+            console.log('Hiding file browser');
+            fileBrowser.style.display = 'none';
+        }
+
+        viewer.addHandler('open', function() {
+            console.log('Viewer opened successfully');
+            
+            // Wait a bit for the viewer to fully initialize
+            setTimeout(() => {
+                setupAnnotations();
+                setupTracking();
+                setupDynamicImageInfoUpdates(); // Add dynamic viewport tracking
+                
+                // Make sure the viewer canvas is properly set up for annotations
+                const canvas = viewer.canvas;
+                if (canvas) {
+                    console.log('Canvas found, setting up for annotations');
+                    // Ensure the canvas is interactive
+                    canvas.style.pointerEvents = 'auto';
+                } else {
+                    console.warn('Canvas not found');
+                }
+                
+                if (loadingDiv) {
+                    loadingDiv.style.display = 'none';
+                    console.log('Loading indicator hidden');
+                }
+                const tiledImage = viewer.world.getItemAt(0);
+
+                if (tiledImage) {
+                    const dimensions = tiledImage.getContentSize();
+                    wsi_height = dimensions.y
+                    wsi_width = dimensions.x
+                    console.log("image dimensions", wsi_width, "x", wsi_height);
+                }
+
+            }, 500); // Wait 500ms for viewer to stabilize
+        });
+
+        viewer.addHandler('open-failed', function(event) {
+            console.error('Viewer failed to open:', event);
+            throw new Error('Failed to open viewer');
+        });
+
+    } catch (error) {
+        console.error('Error loading TIFF file:', error);
+        
+        let errorMessage = 'Error loading TIFF file. ';
+        if (error.message.includes('GeoTIFFTileSource')) {
+            errorMessage += 'GeoTIFF library not loaded properly. Please check your dependencies.';
+        } else if (error.message.includes('OpenSeadragon')) {
+            errorMessage += 'OpenSeadragon library not loaded properly.';
+        } else {
+            errorMessage += 'Please ensure it\'s a valid pyramid TIFF or SVS file.';
+        }
+        
+        alert(errorMessage);
+        
+        const loadingDiv = document.getElementById('loading-indicator');
+        if (loadingDiv) {
+            loadingDiv.style.display = 'none';
+        }
+    }
+}
+
+function setupAnnotations() {
+    if (anno) {
+        anno.destroy();
+        anno = null;
+    }
+
+    // Initialize Annotorious
+    anno = OpenSeadragon.Annotorious(viewer);
+    
+    // Add selector pack for additional tools
+    if (typeof Annotorious !== 'undefined' && Annotorious.SelectorPack) {
+        Annotorious.SelectorPack(anno);
+    }
+
+    // Set initial drawing tool based on current selection
+    setActiveTool(currentTool);
+
+    // Enable drawing by default
+    anno.setDrawingEnabled(true);
+
+    // Set up event handlers
+    anno.on('createAnnotation', async function(annotation) {
+        console.log('🔍 Annotation created:', annotation);
+        console.log('🔍 Current tool:', currentTool);
+        console.log('🔍 SAM connected:', samConnected);
+        console.log('🔍 SAM live mode:', samLiveMode);
+        
+        // Handle SAM tools differently - use prompts to get SAM prediction
+        if (currentTool.startsWith('sam-') && samConnected && samLiveMode) {
+            try {
+                console.log('Processing SAM prompt...');
+                
+                // Mark this as a SAM prompt to prevent editor popup
+                annotation.samPrompt = true;
+                
+                // Immediately remove the prompt annotation (it's just a cue for SAM)
+                setTimeout(() => {
+                    anno.removeAnnotation(annotation);
+                }, 50);
+                
+                // Get SAM prediction using this prompt
+                const samAnnotation = await processSAMPrompt(annotation);
+                
+                if (samAnnotation) {
+                    // Add the SAM-generated annotation (this will trigger editor popup)
+                    console.log('🎯 Adding SAM annotation to viewer (path 2):', samAnnotation.id);
+                    anno.addAnnotation(samAnnotation);
+                    console.log('🎯 SAM annotation added to viewer (path 2)');
+                    
+                    // Add to the SAM annotations list
+                    addAnnotationToList(samAnnotation);
+                    applyPolarityStyle(samAnnotation);
+                    
+                    // Verify annotation was added
+                    setTimeout(() => {
+                        const allAnnotations = anno.getAnnotations();
+                        console.log('🔍 All annotations in viewer (path 2):', allAnnotations.length);
+                        console.log('🔍 SAM annotation in viewer? (path 2)', allAnnotations.some(a => a.id === samAnnotation.id));
+                    }, 100);
+                }
+                
+            } catch (error) {
+                console.error('SAM processing failed:', error);
+                // If SAM fails, show error and remove the prompt
+                alert('SAM processing failed. Please try again.');
+            }
+        } else {
+            // Normal manual annotation workflow
+            addAnnotationToList(annotation);
+            applyPolarityStyle(annotation);
+        }
+        
+        // Reset quadrilateral tracking
+        quadrilateralMode = false;
+        polygonVertexCount = 0;
+        stopQuadrilateralTracking();
+        
+        // Maintain tool persistence - keep the same tool active
+        setTimeout(() => {
+            anno.setDrawingEnabled(true);
+            // Re-apply current tab defaults to ensure tool stays active
+            applyTabDefaults(currentTab);
+        }, 100);
+    });
+
+    anno.on('updateAnnotation', function(annotation, previous) {
+        console.log('Annotation updated:', annotation);
+        updateAnnotationInList(annotation);
+        applyPolarityStyle(annotation);
+    });
+
+    anno.on('deleteAnnotation', function(annotation) {
+        console.log('Annotation deleted:', annotation);
+        removeAnnotationFromList(annotation);
+    });
+
+    anno.on('selectAnnotation', function(annotation) {
+        console.log('Annotation selected:', annotation);
+        highlightAnnotationInList(annotation);
+    });
+
+    // Handle annotation cancellation
+    anno.on('cancelSelection', function(event) {
+        console.log('Selection cancelled:', currentTool);
+        
+        // Reset quadrilateral mode if applicable
+        if (currentTool === 'quadrilateral') {
+            viewer.setMouseNavEnabled(true);
+            quadrilateralMode = false;
+            polygonVertexCount = 0;
+            stopQuadrilateralTracking();
+        }
+        
+        // Maintain tool persistence even after cancellation
+        setTimeout(() => {
+            anno.setDrawingEnabled(true);
+            applyTabDefaults(currentTab);
+        }, 100);
+    });
+
+    // Enhanced quadrilateral handling
+    anno.on('startSelection', function(event) {
+        console.log('Start selection:', currentTool);
+        if (currentTool === 'quadrilateral') {
+            viewer.setMouseNavEnabled(false);
+            quadrilateralMode = true;
+            polygonVertexCount = 0;
+            startQuadrilateralTracking();
+        }
+    });
+
+    anno.on('cancelSelection', function(event) {
+        console.log('Cancel selection:', currentTool);
+        if (currentTool === 'quadrilateral') {
+            viewer.setMouseNavEnabled(true);
+            quadrilateralMode = false;
+            polygonVertexCount = 0;
+            stopQuadrilateralTracking();
+        }
+        
+        // Maintain tool persistence after cancellation
+        setTimeout(() => {
+            anno.setDrawingEnabled(true);
+            applyTabDefaults(currentTab);
+        }, 100);
+    });
+
+    // Control annotation editor popup behavior  
+    anno.on('createSelection', function(selection) {
+        console.log('🎯 createSelection event:', selection);
+        console.log('🎯 Current tool:', currentTool);
+        
+        // For SAM tools, process the selection as a prompt
+        if (currentTool.startsWith('sam-') && samConnected && samLiveMode) {
+            console.log('🎯 SAM prompt detected - processing immediately');
+            
+            // Process SAM prompt directly from selection (don't wait for annotation)
+            setTimeout(async () => {
+                try {
+                    // Create a temporary annotation from the selection for SAM processing
+                    const promptAnnotation = {
+                        ...selection,
+                        id: 'temp-sam-prompt-' + Date.now(),
+                        body: [{ type: 'TextualBody', value: 'SAM Processing...', purpose: 'commenting' }],
+                        samPrompt: true
+                    };
+                    
+                    console.log('🚀 Processing SAM selection directly...');
+                    console.log('🔍 Selection structure:', JSON.stringify(selection, null, 2));
+                    console.log('🔍 Prompt annotation structure:', JSON.stringify(promptAnnotation, null, 2));
+                    
+                    // Process with SAM API
+                    const samAnnotation = await processSAMPrompt(promptAnnotation);
+                    
+                    if (samAnnotation) {
+                        console.log('✅ SAM processing successful, adding result');
+                        
+                        // Add the SAM result annotation
+                        console.log('🎯 Adding SAM annotation to viewer:', samAnnotation.id);
+                        anno.addAnnotation(samAnnotation);
+                        console.log('🎯 SAM annotation added to viewer');
+                        
+                        // Add to annotations list
+                        addAnnotationToList(samAnnotation);
+                        applyPolarityStyle(samAnnotation);
+                        
+                        // Verify annotation was added
+                        setTimeout(() => {
+                            const allAnnotations = anno.getAnnotations();
+                            console.log('🔍 All annotations in viewer:', allAnnotations.length);
+                            console.log('🔍 SAM annotation in viewer?', allAnnotations.some(a => a.id === samAnnotation.id));
+                        }, 100);
+                        
+                    } else {
+                        console.error('❌ SAM processing returned null');
+                        alert('SAM processing failed: No segmentation result returned from API');
+                    }
+                    
+                } catch (error) {
+                    console.error('❌ SAM processing failed:', error);
+                    alert('SAM processing failed: ' + error.message);
+                }
+            }, 50);
+            
+            // Suppress the default editor popup
+            return false;
+        } else {
+            console.log('🎯 Manual tool - normal flow');
+        }
+    });
+
+    // Also handle the selection event differently for SAM
+    anno.on('selectAnnotation', function(annotation) {
+        console.log('🎯 selectAnnotation event:', annotation);
+        
+        // Don't show editor for SAM prompts
+        if (annotation.samPrompt) {
+            console.log('🎯 SAM prompt annotation - suppressing editor');
+            return false;
+        }
+    });
+
+    // Monitor polygon vertex clicks
+    document.addEventListener('click', function(e) {
+        if (quadrilateralMode && currentTool === 'quadrilateral') {
+            // Check if we're clicking in the annotation area
+            const annotationLayer = document.querySelector('svg.a9s-annotationlayer');
+            if (annotationLayer && annotationLayer.contains(e.target)) {
+                polygonVertexCount++;
+                console.log('Polygon vertex count:', polygonVertexCount);
+                
+                // Complete the quadrilateral when we have 4 vertices
+                if (polygonVertexCount >= 4) {
+                    setTimeout(() => {
+                        completeQuadrilateral();
+                    }, 100);
+                }
+            }
+        }
+    });
+
+    // Debug: Check if annotation is working
+    setTimeout(() => {
+        console.log('Annotorious setup complete');
+    }, 1000);
+}
+
+function applyPolarityStyle(annotation) {
+    if (!annotation.polarity) return;
+    
+    setTimeout(() => {
+        const annotationElements = document.querySelectorAll('svg.a9s-annotationlayer .a9s-annotation');
+        annotationElements.forEach(element => {
+            const annotationId = element.getAttribute('data-id') || element.id;
+            if (annotationId === annotation.id || element.querySelector(`[data-id="${annotation.id}"]`)) {
+                const inner = element.querySelector('.a9s-inner');
+                if (inner && annotation.polarity) {
+                    if (annotation.polarity === 'positive') {
+                        inner.style.stroke = '#30d158';
+                        inner.style.fill = 'rgba(48, 209, 88, 0.2)';
+                    } else if (annotation.polarity === 'negative') {
+                        inner.style.stroke = '#ff453a';
+                        inner.style.fill = 'rgba(255, 69, 58, 0.2)';
+                    }
+                }
+            }
+        });
+    }, 100);
+}
+
+function addAnnotationToList(annotation) {
+    const toolType = getAnnotationToolType(annotation);
+    
+    console.log('📝 Adding annotation to list:', {
+        id: annotation.id,
+        samGenerated: annotation.samGenerated,
+        currentTool: currentTool,
+        toolType: toolType
+    });
+    
+    // Determine category - SAM annotations always go to 'sam', manual to 'manual'
+    let category;
+    if (annotation.samGenerated || currentTool.startsWith('sam-')) {
+        category = 'sam';
+        annotation.samGenerated = true;
+        annotation.samTool = currentTool;
+        console.log('📝 Categorized as SAM annotation');
+    } else {
+        category = 'manual';
+        console.log('📝 Categorized as manual annotation');
+    }
+    
+    if (currentPolarity && (currentTool === 'point' || currentTool === 'sam-point' || currentTool === 'scribble')) {
+        annotation.polarity = currentPolarity;
+        if (!annotation.body) annotation.body = [];
+        if (!annotation.body[0]) annotation.body[0] = { type: 'TextualBody', value: 'Annotation' };
+        annotation.body[0].purpose = annotation.polarity;
+        
+    }
+    
+    // Add timestamp to annotation
+    annotation.createdAt = new Date().toISOString();
+    
+    // Add to specific category
+    annotations[category].push(annotation);
+    
+    // Always update the list display for the annotation's category
+    const listElement = document.getElementById(category + '-annotations');
+    if (listElement) {
+        const item = createAnnotationItem(annotation, category);
+        listElement.appendChild(item);
+        console.log(`Added annotation to ${category} list:`, annotation.id);
+        
+        // Update annotation count
+        updateAnnotationCount(category);
+    } else {
+        console.error(`List element not found: ${category}-annotations`);
+    }
+}
+
+function createAnnotationItem(annotation, category) {
+    const item = document.createElement('div');
+    item.className = 'annotation-item';
+    item.dataset.annotationId = annotation.id;
+    
+    // Create main content container
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'annotation-content';
+    
+    let text = 'Annotation';
+    if (annotation.body && annotation.body[0]) {
+        text = annotation.body[0].value;
+    }
+    
+    // Add SAM indicator for SAM-generated annotations
+    if (annotation.samGenerated) {
+        text = `🤖 ${text}`;
+        item.classList.add('sam-annotation');
+        if (annotation.samQuality) {
+            item.title = `SAM Quality: ${annotation.samQuality.toFixed(2)}`;
+        }
+    }
+    
+    if (annotation.polarity) {
+        text = `${annotation.polarity === 'positive' ? '+' : '−'} ${text}`;
+        item.classList.add('polarity-' + annotation.polarity);
+    }
+    
+    contentDiv.textContent = text;
+    
+    // Create action buttons container
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'annotation-actions';
+    
+    // Export button
+    const exportBtn = document.createElement('button');
+    exportBtn.className = 'annotation-export-btn';
+    exportBtn.textContent = '💾';
+    exportBtn.title = 'Export this annotation';
+    exportBtn.addEventListener('click', function(e) {
+        e.stopPropagation(); // Prevent item selection
+        exportSingleAnnotation(annotation, category);
+    });
+    
+    // Delete button
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'annotation-delete-btn';
+    deleteBtn.textContent = '🗑️';
+    deleteBtn.title = 'Delete this annotation';
+    deleteBtn.addEventListener('click', function(e) {
+        e.stopPropagation(); // Prevent item selection
+        if (confirm('Delete this annotation?')) {
+            deleteAnnotation(annotation, category);
+        }
+    });
+    
+    actionsDiv.appendChild(exportBtn);
+    actionsDiv.appendChild(deleteBtn);
+    
+    item.appendChild(contentDiv);
+    item.appendChild(actionsDiv);
+    
+    // Click handler for selecting annotation
+    contentDiv.addEventListener('click', function() {
+        console.log('Annotation clicked:', annotation.id);
+        
+        // First, clear any current selection
+        anno.cancelSelected();
+        
+        // If we're not in the right tab, switch to it
+        if (currentTab !== category) {
+            const tabButton = document.querySelector(`[data-tab="${category}"]`);
+            if (tabButton) {
+                tabButton.click();
+            }
+        }
+        
+        // Wait a moment for tab switch, then select the annotation
+        setTimeout(() => {
+            try {
+                anno.selectAnnotation(annotation.id);
+                console.log('Annotation selected:', annotation.id);
+            } catch (error) {
+                console.error('Failed to select annotation:', error);
+            }
+        }, 100);
+    });
+    
+    return item;
+}
+
+function updateAnnotationCount(category) {
+    const countElement = document.getElementById(category + '-count');
+    if (countElement) {
+        const count = annotations[category] ? annotations[category].length : 0;
+        countElement.textContent = count.toString();
+    }
+}
+
+function updateAnnotationInList(annotation) {
+    const item = document.querySelector(`[data-annotation-id="${annotation.id}"]`);
+    if (item) {
+        let text = 'Annotation';
+        if (annotation.body && annotation.body[0]) {
+            text = annotation.body[0].value;
+        }
+        
+        if (annotation.polarity) {
+            text = `${annotation.polarity === 'positive' ? '+' : '−'} ${text}`;
+        }
+        
+        item.textContent = text;
+    }
+}
+
+function removeAnnotationFromList(annotation) {
+    const item = document.querySelector(`[data-annotation-id="${annotation.id}"]`);
+    if (item) {
+        const category = Object.keys(annotations).find(cat => 
+            annotations[cat].some(a => a.id === annotation.id)
+        );
+        
+        if (category) {
+            annotations[category] = annotations[category].filter(a => a.id !== annotation.id);
+            updateAnnotationCount(category);
+        }
+        
+        item.remove();
+        console.log(`Removed annotation from ${category} list:`, annotation.id);
+    }
+}
+
+function highlightAnnotationInList(annotation) {
+    document.querySelectorAll('.annotation-item').forEach(item => {
+        item.classList.remove('selected');
+    });
+    
+    const item = document.querySelector(`[data-annotation-id="${annotation.id}"]`);
+    if (item) {
+        item.classList.add('selected');
+    }
+}
+
+function getAnnotationToolType(annotation) {
+    if (annotation.target && annotation.target.selector) {
+        const selector = annotation.target.selector;
+        
+        if (selector.type === 'SvgSelector') {
+            const svgString = selector.value;
+            if (svgString.includes('<circle')) return 'circle';
+            if (svgString.includes('<rect')) return 'rect';
+            if (svgString.includes('<polygon')) {
+                return quadrilateralMode || currentTool === 'quadrilateral' ? 'quadrilateral' : 'polygon';
+            }
+            if (svgString.includes('<path')) {
+                return currentTool === 'scribble' ? 'scribble' : 'freehand';
+            }
+        }
+        
+        if (selector.type === 'FragmentSelector') {
+            return 'rect';
+        }
+        
+        if (selector.type === 'PointSelector') {
+            return 'point';
+        }
+    }
+    
+    // Fallback to current tool if we can't determine from annotation
+    return currentTool;
+}
+
+function setupTracking() {
+    const positionEl = document.querySelector('.position');
+    const zoomEl = document.querySelector('.zoom');
+
+    if (!positionEl || !zoomEl) return;
+
+    positionEl.innerHTML = 'Position:<br>(NA)';
+    zoomEl.innerHTML = 'Zoom:<br>NA';
+
+    const updateZoom = function() {
+        const zoom = viewer.viewport.getZoom(true);
+        const imageZoom = viewer.viewport.viewportToImageZoom(zoom);
+        zoomEl.innerHTML = `Zoom:<br>${Math.round(zoom * 100) / 100}<br><br>Image:<br>${Math.round(imageZoom * 100) / 100}`;
+    };
+
+    const tracker = new OpenSeadragon.MouseTracker({
+        element: viewer.container,
+        moveHandler: function(event) {
+            const webPoint = event.position;
+            const viewportPoint = viewer.viewport.pointFromPixel(webPoint);
+            const imagePoint = viewer.viewport.viewportToImageCoordinates(viewportPoint);
+
+            positionEl.innerHTML = `Position:<br>${Math.round(imagePoint.x)}, ${Math.round(imagePoint.y)}`;
+            updateZoom();
+        }
+    });
+    
+    tracker.setTracking(true);
+    viewer.addHandler('animation', updateZoom);
+}
+
+function exportSingleAnnotation(annotation, category) {
+    // Export a single annotation in the example format
+    const exportAnnotation = createExportAnnotation(annotation, category, 1);
+    const exportData = [exportAnnotation];
+    
+    const dataStr = JSON.stringify(exportData, null, 2);
+    const dataBlob = new Blob([dataStr], {type: 'application/json'});
+    const url = URL.createObjectURL(dataBlob);
+    
+    // Create filename with annotation info
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+    const annotationName = (annotation.body && annotation.body[0] && annotation.body[0].value) 
+        ? annotation.body[0].value.replace(/[^a-zA-Z0-9]/g, '_') 
+        : 'annotation';
+    const filename = `${annotationName}_${category}_${timestamp}.json`;
+    
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    
+    console.log('Exported single annotation:', exportAnnotation);
+    alert(`Exported annotation to ${filename}`);
+}
+
+function exportAllAnnotations() {
+    const exportData = [];
+    let annotationIndex = 0;
+    
+    // Combine all annotations into a single array following the example format
+    Object.keys(annotations).forEach(category => {
+        annotations[category].forEach(annotation => {
+            annotationIndex++;
+            
+            // Convert annotation to the format used in the examples
+            const exportAnnotation = createExportAnnotation(annotation, category, annotationIndex);
+            exportData.push(exportAnnotation);
+        });
+    });
+    
+    if (exportData.length === 0) {
+        alert('No annotations to export');
+        return;
+    }
+    
+    const dataStr = JSON.stringify(exportData, null, 2);
+    const dataBlob = new Blob([dataStr], {type: 'application/json'});
+    const url = URL.createObjectURL(dataBlob);
+    
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+    const filename = `wsi-annotations-all-${timestamp}.json`;
+    
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    
+    console.log('Exported all annotations:', exportData);
+    alert(`Exported ${exportData.length} annotations to ${filename}`);
+}
+
+function deleteAnnotation(annotation, category) {
+    // Remove from Annotorious
+    try {
+        anno.removeAnnotation(annotation.id);
+    } catch (error) {
+        console.warn('Could not remove annotation from viewer:', error);
+    }
+    
+    // Remove from our annotations array
+    const categoryAnnotations = annotations[category];
+    const index = categoryAnnotations.findIndex(a => a.id === annotation.id);
+    if (index > -1) {
+        categoryAnnotations.splice(index, 1);
+    }
+    
+    // Remove from DOM
+    const listElement = document.getElementById(category + '-annotations');
+    if (listElement) {
+        const itemElement = listElement.querySelector(`[data-annotation-id="${annotation.id}"]`);
+        if (itemElement) {
+            itemElement.remove();
+        }
+    }
+    
+    // Update count
+    updateAnnotationCount(category);
+    
+    console.log('Deleted annotation:', annotation.id);
+}
+
+function createExportAnnotation(annotation, category, index) {
+    // Create annotation in the format matching the examples
+    const currentTime = new Date().toISOString();
+    const annotationId = annotation.id || `annotation_${index}`;
+    
+    // Get annotation text
+    let description = 'Annotation';
+    if (annotation.body && annotation.body[0] && annotation.body[0].value) {
+        description = annotation.body[0].value;
+    }
+    
+    // Convert annotation geometry to the element format
+    const elements = convertAnnotationToElements(annotation);
+    
+    const exportAnnotation = {
+        "_accessLevel": 2,
+        "_id": annotationId,
+        "_modelType": "annotation", 
+        "_version": Math.floor(Math.random() * 10000), // Random version number
+        "annotation": {
+            "description": description,
+            "elements": elements,
+            "name": `${category.charAt(0).toUpperCase() + category.slice(1)} Annotation ${new Date().toLocaleDateString()}`
+        },
+        "created": annotation.createdAt || currentTime,
+        "creatorId": "wsi-annotation-demo", 
+        "groups": [null],
+        "itemId": "wsi-demo-item",
+        "public": false,
+        "updated": currentTime,
+        "updatedId": "wsi-annotation-demo",
+        "_elementQuery": {
+            "count": elements.length,
+            "details": elements.length * 4,
+            "filter": {"_version": Math.floor(Math.random() * 10000), "annotationId": annotationId},
+            "offset": 0,
+            "returned": elements.length,
+            "sort": ["_id", 1]
+        }
+    };
+    
+    return exportAnnotation;
+}
+
+function convertAnnotationToElements(annotation) {
+    // Convert annotation geometry to elements array format
+    const elements = [];
+    
+    try {
+        if (!annotation.target || !annotation.target.selector) {
+            console.warn('No selector found in annotation');
+            return elements;
+        }
+        
+        const selector = annotation.target.selector;
+        let element = null;
+        
+        if (selector.type === 'SvgSelector') {
+            element = parseSVGToElement(selector.value, annotation);
+        } else if (selector.type === 'FragmentSelector') {
+            element = parseFragmentToElement(selector.value, annotation);
+        }
+        
+        if (element) {
+            elements.push(element);
+        }
+        
+    } catch (error) {
+        console.error('Error converting annotation to elements:', error);
+    }
+    
+    return elements;
+}
+
+function parseSVGToElement(svgString, annotation) {
+    // Parse SVG and convert to element format
+    try {
+        // For SAM annotations, use the stored WSI geometry directly
+        if (annotation.samGenerated && annotation.wsiGeometry) {
+            console.log('🔧 Using WSI geometry for SAM annotation export');
+            return convertWSIGeometryToElement(annotation.wsiGeometry, annotation);
+        }
+        
+        const parser = new DOMParser();
+        const svgDoc = parser.parseFromString(svgString, 'image/svg+xml');
+        const shapes = svgDoc.querySelectorAll('circle, rect, polygon, path');
+        
+        if (shapes.length === 0) return null;
+        
+        const shape = shapes[0];
+        const baseElement = {
+            "fillColor": "rgba(0,0,0,0)",
+            "lineColor": getAnnotationColor(annotation),
+            "lineWidth": 2,
+            "rotation": 0,
+            "normal": [0, 0, 1],
+            "id": annotation.id || generateId()
+        };
+        
+        if (shape.tagName === 'circle') {
+            const cx = parseFloat(shape.getAttribute('cx'));
+            const cy = parseFloat(shape.getAttribute('cy'));
+            const r = parseFloat(shape.getAttribute('r'));
+            
+            return {
+                ...baseElement,
+                "type": "circle",
+                "center": [cx, cy, 0],
+                "radius": r
+            };
+        } else if (shape.tagName === 'rect') {
+            const x = parseFloat(shape.getAttribute('x'));
+            const y = parseFloat(shape.getAttribute('y'));
+            const width = parseFloat(shape.getAttribute('width'));
+            const height = parseFloat(shape.getAttribute('height'));
+            
+            return {
+                ...baseElement,
+                "type": "rectangle",
+                "center": [x + width/2, y + height/2, 0],
+                "width": width,
+                "height": height
+            };
+        } else if (shape.tagName === 'polygon' || shape.tagName === 'path') {
+            // Convert polygon/path to polyline format
+            const points = extractPolygonPoints(shape, annotation);
+            if (points.length > 0) {
+                return {
+                    ...baseElement,
+                    "type": "polyline",
+                    "closed": true,
+                    "points": points
+                };
+            }
+        }
+        
+        return null;
+    } catch (error) {
+        console.error('Error parsing SVG to element:', error);
+        return null;
+    }
+}
+
+function convertWSIGeometryToElement(wsiGeometry, annotation) {
+    // Convert WSI geometry directly to element format for export
+    const baseElement = {
+        "fillColor": "rgba(0,0,0,0)",
+        "lineColor": getAnnotationColor(annotation),
+        "lineWidth": 2,
+        "rotation": 0,
+        "normal": [0, 0, 1],
+        "id": annotation.id || generateId()
+    };
+    
+    if (wsiGeometry.type === 'Polygon') {
+        // Convert polygon coordinates to polyline points
+        const coordinates = Array.isArray(wsiGeometry.coordinates[0][0]) 
+            ? wsiGeometry.coordinates[0]  // Polygon with rings
+            : wsiGeometry.coordinates;    // Simple coordinate array
+            
+        const points = coordinates.map(coord => [coord[0], coord[1], 0]);
+        
+        return {
+            ...baseElement,
+            "type": "polyline",
+            "closed": true,
+            "points": points
+        };
+    } else if (wsiGeometry.type === 'Point') {
+        return {
+            ...baseElement,
+            "type": "circle",
+            "center": [wsiGeometry.coordinates[0], wsiGeometry.coordinates[1], 0],
+            "radius": 10
+        };
+    }
+    
+    // Fallback for other geometry types
+    return baseElement;
+}
+
+function parseFragmentToElement(fragmentString, annotation) {
+    // Parse FragmentSelector to element format
+    const match = fragmentString.match(/xywh=pixel:([\d.]+),([\d.]+),([\d.]+),([\d.]+)/);
+    if (!match) return null;
+    
+    const [, x, y, width, height] = match;
+    const px = parseFloat(x);
+    const py = parseFloat(y);
+    const pw = parseFloat(width);
+    const ph = parseFloat(height);
+    
+    const baseElement = {
+        "fillColor": "rgba(0,0,0,0)",
+        "lineColor": getAnnotationColor(annotation),
+        "lineWidth": 2,
+        "rotation": 0,
+        "normal": [0, 0, 1],
+        "id": annotation.id || generateId()
+    };
+    
+    if (pw === 0 && ph === 0) {
+        // Point - represent as small circle
+        return {
+            ...baseElement,
+            "type": "circle",
+            "center": [px, py, 0],
+            "radius": 5
+        };
+    } else {
+        // Rectangle
+        return {
+            ...baseElement,
+            "type": "rectangle",
+            "center": [px + pw/2, py + ph/2, 0],
+            "width": pw,
+            "height": ph
+        };
+    }
+}
+
+function extractPolygonPoints(shape, annotation) {
+    // Extract points from polygon or path for polyline format
+    const points = [];
+    
+    try {
+        if (shape.tagName === 'polygon') {
+            const pointsStr = shape.getAttribute('points');
+            const coords = parsePointsString(pointsStr);
+            coords.forEach(([x, y]) => {
+                points.push([x, y, 0]); // Add z=0
+            });
+        } else if (shape.tagName === 'path') {
+            const pathData = shape.getAttribute('d');
+            const coords = parsePathData(pathData);
+            coords.forEach(([x, y]) => {
+                points.push([x, y, 0]); // Add z=0  
+            });
+        }
+    } catch (error) {
+        console.error('Error extracting polygon points:', error);
+    }
+    
+    return points;
+}
+
+function parsePointsString(pointsStr) {
+    // Parse SVG points string
+    const coords = [];
+    const points = pointsStr.trim().split(/[\s,]+/);
+    
+    for (let i = 0; i < points.length; i += 2) {
+        if (i + 1 < points.length) {
+            coords.push([parseFloat(points[i]), parseFloat(points[i + 1])]);
+        }
+    }
+    
+    return coords;
+}
+
+function parsePathData(pathData) {
+    // Simplified path parser
+    const coords = [];
+    const commands = pathData.match(/[MLZ][\d\s,.-]+/g) || [];
+    
+    for (const command of commands) {
+        const type = command[0];
+        const values = command.slice(1).trim().split(/[\s,]+/).map(v => parseFloat(v));
+        
+        if ((type === 'M' || type === 'L') && values.length >= 2) {
+            coords.push([values[0], values[1]]);
+        }
+    }
+    
+    return coords;
+}
+
+function getAnnotationColor(annotation) {
+    // Get color based on annotation properties
+    if (annotation.polarity === 'positive') return 'rgb(0,255,0)';
+    if (annotation.polarity === 'negative') return 'rgb(255,0,0)'; 
+    if (annotation.samGenerated) return 'rgb(0,255,255)';
+    return 'rgb(0,0,0)'; // Default black
+}
+
+function generateId() {
+    // Generate random ID similar to the examples
+    return Math.random().toString(36).substr(2, 24);
+}
+
+function calculatePolygonArea(coordinates) {
+    // Calculate area of polygon using shoelace formula
+    // coordinates should be array of [x, y] or [x, y, z] points
+    if (!coordinates || coordinates.length < 3) {
+        return 0;
+    }
+    
+    let area = 0;
+    const n = coordinates.length;
+    
+    for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        const xi = coordinates[i][0] || 0;
+        const yi = coordinates[i][1] || 0;
+        const xj = coordinates[j][0] || 0;
+        const yj = coordinates[j][1] || 0;
+        
+        area += xi * yj;
+        area -= xj * yi;
+    }
+    
+    return Math.abs(area) / 2;
+}
+
+function importAnnotations() {
+    // Create file input for import
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.json';
+    fileInput.style.display = 'none';
+    
+    fileInput.addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                const importedData = JSON.parse(e.target.result);
+                console.log('Imported data:', importedData);
+                
+                // Process imported data based on format
+                let importedCount = 0;
+                
+                if (Array.isArray(importedData)) {
+                    // Handle array format (from our export)
+                    importedData.forEach(annotationData => {
+                        try {
+                            const annotation = convertImportedAnnotationToAnnotorious(annotationData);
+                            if (annotation) {
+                                addAnnotationToList(annotation);
+                                anno.addAnnotation(annotation);
+                                importedCount++;
+                            }
+                        } catch (error) {
+                            console.error('Error processing annotation:', error);
+                        }
+                    });
+                } else if (importedData.annotations) {
+                    // Handle object format with categories
+                    Object.keys(importedData.annotations).forEach(category => {
+                        importedData.annotations[category].forEach(annotation => {
+                            addAnnotationToList(annotation);
+                            anno.addAnnotation(annotation);
+                            importedCount++;
+                        });
+                    });
+                } else {
+                    alert('Invalid annotation file format');
+                    return;
+                }
+                
+                alert(`Imported ${importedCount} annotations`);
+                
+            } catch (error) {
+                console.error('Import error:', error);
+                alert('Error importing annotations: ' + error.message);
+            }
+        };
+        reader.readAsText(file);
+    });
+    
+    document.body.appendChild(fileInput);
+    fileInput.click();
+    document.body.removeChild(fileInput);
+}
+
+function convertImportedAnnotationToAnnotorious(annotationData) {
+    // Convert exported annotation format back to Annotorious format
+    try {
+        if (!annotationData.annotation || !annotationData.annotation.elements) {
+            console.warn('Invalid annotation data:', annotationData);
+            return null;
+        }
+        
+        const element = annotationData.annotation.elements[0];
+        if (!element) return null;
+        
+        let selector;
+        
+        if (element.type === 'polyline' && element.points) {
+            // Convert polyline points back to SVG path
+            let pathData = '';
+            element.points.forEach((point, index) => {
+                const [x, y] = point;
+                pathData += (index === 0 ? `M ${x} ${y}` : ` L ${x} ${y}`);
+            });
+            if (element.closed) {
+                pathData += ' Z';
+            }
+            
+            selector = {
+                type: 'SvgSelector',
+                value: `<svg><path d="${pathData}" /></svg>`
+            };
+        } else if (element.type === 'rectangle') {
+            // Convert rectangle back to SVG
+            const x = element.center[0] - element.width/2;
+            const y = element.center[1] - element.height/2;
+            
+            selector = {
+                type: 'SvgSelector',
+                value: `<svg><rect x="${x}" y="${y}" width="${element.width}" height="${element.height}" /></svg>`
+            };
+        } else if (element.type === 'circle') {
+            // Convert circle back to SVG
+            selector = {
+                type: 'SvgSelector',
+                value: `<svg><circle cx="${element.center[0]}" cy="${element.center[1]}" r="${element.radius}" /></svg>`
+            };
+        } else {
+            console.warn('Unsupported element type:', element.type);
+            return null;
+        }
+        
+        const annotation = {
+            id: annotationData._id || 'imported-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9),
+            target: {
+                source: window.location.href,
+                selector: selector
+            },
+            body: [{
+                type: 'TextualBody',
+                value: annotationData.annotation.description || 'Imported Annotation'
+            }],
+            createdAt: annotationData.created || new Date().toISOString()
+        };
+        
+        return annotation;
+        
+    } catch (error) {
+        console.error('Error converting imported annotation:', error);
+        return null;
+    }
+}
+
+function setupKeyboardShortcuts() {
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Delete' && anno) {
+            const selected = anno.getSelected();
+            if (selected) {
+                anno.removeAnnotation(selected);
+            }
+        }
+        
+
+        
+        if (e.key === 'ArrowLeft' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            const leftArrow = document.getElementById('tab-arrow-left');
+            if (leftArrow && !leftArrow.disabled) {
+                leftArrow.click();
+            }
+        }
+        
+        if (e.key === 'ArrowRight' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            const rightArrow = document.getElementById('tab-arrow-right');
+            if (rightArrow && !rightArrow.disabled) {
+                rightArrow.click();
+            }
+        }
+        
+        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+            e.preventDefault();
+            exportAnnotations();
+        }
+        
+        if ((e.ctrlKey || e.metaKey) && e.key === 'o') {
+            e.preventDefault();
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json';
+            input.onchange = function(event) {
+                if (event.target.files[0]) {
+                    importAnnotations(event.target.files[0]);
+                }
+            };
+            input.click();
+        }
+        
+        // Escape key to cancel current annotation
+        if (e.key === 'Escape' && quadrilateralMode) {
+            viewer.setMouseNavEnabled(true);
+            quadrilateralMode = false;
+            polygonVertexCount = 0;
+            stopQuadrilateralTracking();
+            if (anno) {
+                anno.cancelSelected();
+            }
+        }
+    });
+}
+
+function setupContextMenu() {
+    document.addEventListener('contextmenu', function(e) {
+        if (e.target.closest('.tab-container')) {
+            e.preventDefault();
+            showSimpleContextMenu(e.clientX, e.clientY);
+        }
+    });
+}
+
+function showSimpleContextMenu(x, y) {
+    const existingMenu = document.querySelector('.simple-context-menu');
+    if (existingMenu) existingMenu.remove();
+    
+    const menu = document.createElement('div');
+    menu.className = 'simple-context-menu';
+    menu.style.cssText = `
+        position: fixed;
+        top: ${y}px;
+        left: ${x}px;
+        background: #2c2c2e;
+        border: 1px solid #3a3a3c;
+        border-radius: 8px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        z-index: 10000;
+        min-width: 150px;
+        overflow: hidden;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    `;
+    
+    const menuItems = [
+        { text: 'Export Annotations', action: exportAnnotations },
+        { text: 'Import Annotations', action: () => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json';
+            input.onchange = (e) => importAnnotations(e.target.files[0]);
+            input.click();
+        }},
+        { text: 'Clear All', action: () => {
+            if (confirm('Clear all annotations?')) {
+                if (anno) anno.clearAnnotations();
+                Object.keys(annotations).forEach(key => {
+                    annotations[key] = [];
+                    const list = document.getElementById(key + '-annotations');
+                    if (list) list.innerHTML = '';
+                });
+            }
+        }}
+    ];
+    
+    menuItems.forEach(item => {
+        const button = document.createElement('button');
+        button.textContent = item.text;
+        button.style.cssText = `
+            width: 100%;
+            padding: 10px 16px;
+            border: none;
+            background: none;
+            color: #fff;
+            text-align: left;
+            cursor: pointer;
+            font-size: 13px;
+        `;
+        button.onmouseover = () => button.style.background = '#3a3a3c';
+        button.onmouseout = () => button.style.background = 'none';
+        button.onclick = () => {
+            item.action();
+            menu.remove();
+        };
+        menu.appendChild(button);
+    });
+    
+    document.body.appendChild(menu);
+    
+    setTimeout(() => {
+        document.addEventListener('click', function removeMenu() {
+            menu.remove();
+            document.removeEventListener('click', removeMenu);
+        });
+    }, 100);
+}
+
+// SAM API Integration Functions
+function initializeSAMIntegration() {
+    const connectButton = document.getElementById('sam-connect');
+    const apiUrlInput = document.getElementById('sam-api-url');
+    const statusElement = document.getElementById('sam-status');
+    const thresholdSlider = document.getElementById('sam-threshold');
+    const thresholdValue = document.getElementById('threshold-value');
+    const liveModeCheckbox = document.getElementById('sam-live-mode');
+
+    if (connectButton) {
+        connectButton.addEventListener('click', connectToSAM);
+    }
+
+    if (apiUrlInput) {
+        apiUrlInput.addEventListener('change', function() {
+            samApiUrl = this.value;
+        });
+    }
+
+    if (thresholdSlider) {
+        thresholdSlider.addEventListener('input', function() {
+            if (thresholdValue) {
+                thresholdValue.textContent = this.value;
+            }
+        });
+    }
+
+    if (liveModeCheckbox) {
+        liveModeCheckbox.addEventListener('change', function() {
+            samLiveMode = this.checked;
+        });
+    }
+
+    updateSAMStatus('disconnected');
+}
+
+async function connectToSAM() {
+    const connectButton = document.getElementById('sam-connect');
+    const statusElement = document.getElementById('sam-status');
+    
+    if (samConnected) {
+        // Disconnect
+        samConnected = false;
+        updateSAMStatus('disconnected');
+        if (connectButton) connectButton.textContent = 'Connect';
+        return;
+    }
+
+    try {
+        updateSAMStatus('connecting');
+        if (connectButton) {
+            connectButton.disabled = true;
+            connectButton.textContent = 'Connecting...';
+        }
+
+        // Test connection to SAM API
+        const response = await fetch(`${samApiUrl}/version/`, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (response.ok) {
+            samConnected = true;
+            updateSAMStatus('connected');
+            if (connectButton) connectButton.textContent = 'Disconnect';
+            const versionText = await response.text();
+            console.log('Successfully connected to SAM API, version:', versionText);
+        } else {
+            throw new Error(`SAM API health check failed. Status: ${response.status} ${response.statusText}`);
+        }
+    } catch (error) {
+        console.error('Failed to connect to SAM API:', error);
+        updateSAMStatus('disconnected');
+        if (connectButton) connectButton.textContent = 'Connect';
+        alert('Failed to connect to SAM API. Please check the URL and ensure the service is running.');
+    } finally {
+        if (connectButton) connectButton.disabled = false;
+    }
+}
+
+function updateSAMStatus(status) {
+    const statusElement = document.getElementById('sam-status');
+    if (!statusElement) return;
+
+    statusElement.className = `sam-status ${status}`;
+    switch (status) {
+        case 'connected':
+            statusElement.textContent = 'Connected';
+            break;
+        case 'connecting':
+            statusElement.textContent = 'Connecting...';
+            break;
+        case 'disconnected':
+        default:
+            statusElement.textContent = 'Disconnected';
+            break;
+    }
+}
+
+async function processSAMPrompt(promptAnnotation) {
+    if (!samConnected || !samLiveMode) {
+        console.log('SAM not connected or live mode disabled');
+        alert('SAM processing failed: Not connected or live mode disabled');
+        return null;
+    }
+
+    try {
+        console.log('Processing SAM prompt...', promptAnnotation);
+        
+        // Show processing indicator by adding a temporary annotation
+        const processingAnnotation = {
+            ...promptAnnotation,
+            id: 'processing-' + Date.now(),
+            body: [{ 
+                type: 'TextualBody', 
+                value: '⏳ Processing with SAM...', 
+                purpose: 'commenting' 
+            }]
+        };
+        anno.addAnnotation(processingAnnotation);
+        
+        // Extract coordinates from prompt annotation
+        const coords = extractCoordinatesFromAnnotation(promptAnnotation);
+        if (!coords) {
+            console.error('Failed to extract coordinates from annotation');
+            anno.removeAnnotation(processingAnnotation);
+            alert('SAM processing failed: Could not extract coordinates from selection');
+            return null;
+        }
+        console.log('Extracted coordinates:', coords);
+
+        const threshold = document.getElementById('sam-threshold')?.value || 0.5;
+        
+        // Get current image data
+        const imageInfo = await getCurrentImageData();
+        if (!imageInfo) {
+            console.error('Failed to get image data');
+            anno.removeAnnotation(processingAnnotation);
+            alert('SAM processing failed: Could not capture current image data');
+            return null;
+        }
+        
+        // Store globally for dynamic viewport updates
+        window.currentImageInfo = imageInfo;
+        console.log('🖼️ Image info:', {
+            dataLength: imageInfo.imageData.length,
+            width: imageInfo.width,
+            height: imageInfo.height,
+            longSide: imageInfo.longSide,
+            scale: imageInfo.scale
+        });
+        
+        // Log image dimensions (removed 1024 constraint)
+        console.log('✅ Image dimensions:', {
+            width: imageInfo.width,
+            height: imageInfo.height,
+            longSide: imageInfo.longSide
+        });
+
+        // Debug the entire coordinate transformation pipeline
+        debugCoordinatePipeline(coords, imageInfo);
+        
+        // Transform coordinates from WSI space to viewport space
+        // Transform coordinates using QuPath approach
+        const transformedCoords = transformCoordinatesToCanvasQuPathStyle(coords, imageInfo);
+        console.log('📍 Original WSI coordinates:', coords);
+        console.log('📍 Transformed canvas coordinates (QuPath style):', transformedCoords);
+        
+        // Call SAM API using the format from the examples
+        const samPayload = {
+            type: 'vit_l', // Default model type
+            b64img: imageInfo.imageData,
+            multimask_output: false
+        };
+
+        // Add coordinates based on tool type
+        if (currentTool === 'sam-point') {
+            samPayload.point_coords = [[transformedCoords.x, transformedCoords.y]];
+            samPayload.point_labels = [1]; // 1 for foreground
+            console.log('📍 Point prompt (viewport coords):', samPayload.point_coords);
+        } else if (currentTool === 'sam-rect') {
+            samPayload.bbox = [transformedCoords.x, transformedCoords.y, 
+                              transformedCoords.x + transformedCoords.width, 
+                              transformedCoords.y + transformedCoords.height];
+            console.log('📍 Bbox prompt (viewport coords):', samPayload.bbox);
+        }
+
+
+        console.log('🔥 CALLING SAM API at:', samApiUrl);
+        console.log('🔥 SAM payload (without image):', {
+            ...samPayload,
+            b64img: `[${samPayload.b64img.length} chars]`
+        });
+        
+        // Additional coordinate validation
+        if (samPayload.point_coords) {
+            const [x, y] = samPayload.point_coords[0];
+            console.log('🎯 Point coordinate validation:', {
+                coordinates: [x, y],
+                canvasSize: [imageInfo.width, imageInfo.height],
+                withinBounds: x >= 0 && x < imageInfo.width && y >= 0 && y < imageInfo.height,
+                normalizedCoords: [x / imageInfo.width, y / imageInfo.height]
+            });
+        }
+        
+        if (samPayload.bbox) {
+            const [x1, y1, x2, y2] = samPayload.bbox;
+            console.log('🎯 Bbox coordinate validation:', {
+                bbox: [x1, y1, x2, y2],
+                canvasSize: [imageInfo.width, imageInfo.height],
+                withinBounds: x1 >= 0 && x1 < imageInfo.width && y1 >= 0 && y1 < imageInfo.height &&
+                             x2 >= 0 && x2 <= imageInfo.width && y2 >= 0 && y2 <= imageInfo.height,
+                size: [x2 - x1, y2 - y1]
+            });
+        }
+
+        const response = await fetch(`${samApiUrl}/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'accept': 'application/json'
+            },
+            body: JSON.stringify(samPayload)
+        });
+
+        console.log('SAM API response status:', response.status, response.statusText);
+
+        // Remove the processing indicator
+        anno.removeAnnotation(processingAnnotation);
+
+        if (response.ok) {
+            const samResult = await response.json();
+            
+            // COMPREHENSIVE LOGGING OF SAM API RESPONSE
+            console.log('🔥 ===== SAM API RESPONSE ANALYSIS =====');
+            console.log('📊 Response type:', typeof samResult);
+            console.log('📊 Response constructor:', samResult?.constructor?.name);
+            console.log('📊 Is array?', Array.isArray(samResult));
+            console.log('📊 Response keys (if object):', Object.keys(samResult || {}));
+            console.log('📊 Response length (if array):', samResult?.length);
+            console.log('📊 Full response structure:', JSON.stringify(samResult, null, 2));
+            
+            if (Array.isArray(samResult)) {
+                console.log('📊 Array elements analysis:');
+                samResult.forEach((item, index) => {
+                    console.log(`📊 Item ${index}:`, {
+                        type: typeof item,
+                        constructor: item?.constructor?.name,
+                        keys: Object.keys(item || {}),
+                        hasGeometry: !!item?.geometry,
+                        hasProperties: !!item?.properties,
+                        hasCoordinates: !!item?.geometry?.coordinates,
+                        geometryType: item?.geometry?.type,
+                        coordinatesLength: item?.geometry?.coordinates?.length
+                    });
+                });
+            } else if (samResult && typeof samResult === 'object') {
+                console.log('📊 Object analysis:');
+                console.log('📊 Has features?', !!samResult.features);
+                console.log('📊 Has geometry?', !!samResult.geometry);
+                console.log('📊 Has properties?', !!samResult.properties);
+                console.log('📊 Has coordinates?', !!samResult.geometry?.coordinates);
+                
+                if (samResult.features) {
+                    console.log('📊 Features array length:', samResult.features.length);
+                    samResult.features.forEach((feature, index) => {
+                        console.log(`📊 Feature ${index}:`, {
+                            type: feature?.type,
+                            geometryType: feature?.geometry?.type,
+                            hasCoordinates: !!feature?.geometry?.coordinates,
+                            coordinatesLength: feature?.geometry?.coordinates?.length,
+                            properties: feature?.properties
+                        });
+                    });
+                }
+            }
+            console.log('🔥 ===== END SAM API RESPONSE ANALYSIS =====');
+            
+            if (!samResult) {
+                alert('SAM processing failed: API returned null/undefined result');
+                return null;
+            }
+            
+            // Convert SAM result back to annotation format
+            const samAnnotation = convertSAMResultToAnnotation(samResult, promptAnnotation, imageInfo);
+            if (!samAnnotation) {
+                alert('SAM processing failed: Could not convert result to annotation format');
+                return null;
+            }
+            console.log('Converted SAM annotation:', samAnnotation);
+            
+            return samAnnotation;
+        } else {
+            const errorText = await response.text();
+            console.error('SAM API error:', response.status, response.statusText, errorText);
+            console.log('🔥 SAM API Error Details:');
+            console.log('🔥 Status Code:', response.status);
+            console.log('🔥 Status Text:', response.statusText);
+            console.log('🔥 Response Headers:', Object.fromEntries(response.headers.entries()));
+            console.log('🔥 Error Body:', errorText);
+            alert(`SAM API request failed: ${response.status} ${response.statusText}\n${errorText}`);
+            return null;
+        }
+    } catch (error) {
+        console.error('SAM processing error:', error);
+        alert(`SAM processing failed: ${error.message}`);
+        return null;
+    }
+}
+
+function extractCoordinatesFromAnnotation(annotation) {
+    console.log('🔍 Extracting coordinates from:', annotation);
+    
+    // Handle both selection objects and annotation objects
+    let selector = null;
+    
+    if (annotation.target && annotation.target.selector) {
+        // Standard annotation format
+        selector = annotation.target.selector;
+    } else if (annotation.selector) {
+        // Selection object format
+        selector = annotation.selector;
+    } else {
+        console.error('No selector found in annotation');
+        return null;
+    }
+    
+    console.log('🔍 Found selector:', selector);
+
+    if (selector.type === 'SvgSelector') {
+        // Parse SVG to get coordinates
+        const parser = new DOMParser();
+        const svgDoc = parser.parseFromString(selector.value, 'image/svg+xml');
+        const shapes = svgDoc.querySelectorAll('circle, rect, polygon');
+        
+        console.log('🔍 Found shapes in SVG:', shapes.length);
+        
+        if (shapes.length > 0) {
+            const shape = shapes[0];
+            console.log('🔍 Shape type:', shape.tagName);
+            
+            if (shape.tagName === 'circle') {
+                const coords = {
+                    type: 'point',
+                    x: parseFloat(shape.getAttribute('cx')),
+                    y: parseFloat(shape.getAttribute('cy'))
+                };
+                console.log('🔍 Extracted point coordinates:', coords);
+                return coords;
+            } else if (shape.tagName === 'rect') {
+                const coords = {
+                    type: 'box',
+                    x: parseFloat(shape.getAttribute('x')),
+                    y: parseFloat(shape.getAttribute('y')),
+                    width: parseFloat(shape.getAttribute('width')),
+                    height: parseFloat(shape.getAttribute('height'))
+                };
+                console.log('🔍 Extracted box coordinates:', coords);
+                return coords;
+            }
+        } else {
+            console.error('No shapes found in SVG selector');
+        }
+    } else if (selector.type === 'FragmentSelector') {
+        // Parse FragmentSelector format: "xywh=pixel:15876.39453125,22354.78515625,0,0"
+        console.log('🔍 Parsing FragmentSelector:', selector.value);
+        
+        const match = selector.value.match(/xywh=pixel:([\d.]+),([\d.]+),([\d.]+),([\d.]+)/);
+        if (match) {
+            const [, x, y, width, height] = match;
+            const coords = {
+                x: parseFloat(x),
+                y: parseFloat(y),
+                width: parseFloat(width),
+                height: parseFloat(height)
+            };
+            
+            // Determine if this is a point or box based on width/height
+            if (coords.width === 0 && coords.height === 0) {
+                coords.type = 'point';
+                console.log('🔍 Extracted point coordinates from FragmentSelector:', coords);
+            } else {
+                coords.type = 'box';
+                console.log('🔍 Extracted box coordinates from FragmentSelector:', coords);
+            }
+            
+            return coords;
+        } else {
+            console.error('Could not parse FragmentSelector value:', selector.value);
+        }
+    } else {
+        console.error('Unsupported selector type:', selector.type);
+    }
+    
+    return null;
+}
+
+async function getCurrentImageData() {
+    if (!viewer) {
+        console.error('Viewer not available for image capture');
+        return null;
+    }
+    
+    try {
+        console.log('Capturing current viewport image for SAM...');
+        
+        // Get the current viewport bounds and container
+        const viewport = viewer.viewport;
+        const container = viewer.canvas;
+        
+        // Get current viewport dimensions
+        // Get QuPath-style viewport bounds with downsample factor
+        const currentViewportBounds = getCurrentViewportBounds();
+        const containerSize = viewport.getContainerSize();
+        
+        // Create canvas for capturing the viewport at original size
+        const canvas = document.createElement('canvas');
+        
+        // Use original container dimensions without resizing
+        const targetWidth = Math.round(containerSize.x);
+        const targetHeight = Math.round(containerSize.y);
+        
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        
+        const scale = 1.0; // No scaling applied
+        
+        console.log('📐 Image capture info:', {
+            containerSize: containerSize,
+            targetSize: { width: targetWidth, height: targetHeight },
+            longSide: Math.max(targetWidth, targetHeight),
+            scale: scale
+        });
+        
+        const ctx = canvas.getContext('2d');
+        
+        // Method 1: Try to capture from the viewer's canvas directly
+        try {
+            const viewerCanvas = viewer.canvas.querySelector('canvas');
+            if (viewerCanvas) {
+                console.log('Capturing from OpenSeadragon canvas...');
+                ctx.drawImage(viewerCanvas, 0, 0, canvas.width, canvas.height);
+                
+                // Convert to RGB only (remove alpha channel)
+                const imageData = convertCanvasToRGB(canvas);
+                console.log('Successfully captured RGB image data, length:', imageData.length);
+                console.log('Viewport bounds debug:', currentViewportBounds);
+                return {
+                    imageData: imageData,
+                    width: targetWidth,
+                    height: targetHeight,
+                    scale: scale,
+                    viewportBounds: currentViewportBounds,
+                    containerSize: containerSize,
+                    longSide: Math.max(targetWidth, targetHeight)
+                };
+            }
+        } catch (canvasError) {
+            console.warn('Canvas capture failed, trying alternative method:', canvasError);
+        }
+        
+        // Method 2: Use html2canvas if available, or create a test image
+        console.log('Creating test pattern for SAM (replace with actual image capture)...');
+        
+        // Create a test pattern that SAM can actually process
+        const imageSize = Math.min(canvas.width, canvas.height);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Add some visual elements for SAM to segment
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(canvas.width * 0.2, canvas.height * 0.2, canvas.width * 0.3, canvas.height * 0.3);
+        
+        ctx.fillStyle = '#00ff00';
+        ctx.beginPath();
+        ctx.arc(canvas.width * 0.7, canvas.height * 0.7, canvas.width * 0.1, 0, 2 * Math.PI);
+        ctx.fill();
+        
+        ctx.fillStyle = '#0000ff';
+        ctx.fillRect(canvas.width * 0.1, canvas.height * 0.6, canvas.width * 0.2, canvas.height * 0.2);
+        
+        // Convert to RGB only (remove alpha channel)
+        const imageData = convertCanvasToRGB(canvas);
+        console.log('Generated RGB test image data for SAM, length:', imageData.length);
+        
+        return {
+            imageData: imageData,
+            width: targetWidth,
+            height: targetHeight,
+            scale: scale,
+            viewportBounds: currentViewportBounds,
+            containerSize: containerSize,
+            longSide: Math.max(targetWidth, targetHeight)
+        };
+        
+    } catch (error) {
+        console.error('Failed to get current image data:', error);
+        return null;
+    }
+}
+
+function convertCanvasToRGB(canvas) {
+    // Convert canvas to RGB-only image data (remove alpha channel)
+    try {
+        // Create a new canvas with white background to handle transparency
+        const rgbCanvas = document.createElement('canvas');
+        rgbCanvas.width = canvas.width;
+        rgbCanvas.height = canvas.height;
+        const rgbCtx = rgbCanvas.getContext('2d');
+        
+        // Fill with white background first (in case there's transparency)
+        rgbCtx.fillStyle = 'white';
+        rgbCtx.fillRect(0, 0, rgbCanvas.width, rgbCanvas.height);
+        
+        // Draw the original canvas on top
+        rgbCtx.drawImage(canvas, 0, 0);
+        
+        // Convert to JPEG format to remove alpha channel, then to base64
+        const base64Data = rgbCanvas.toDataURL('image/jpeg', 0.95).split(',')[1];
+        
+        console.log('🎨 Canvas converted to RGB:', {
+            originalSize: `${canvas.width}x${canvas.height}`,
+            format: 'JPEG (RGB only)',
+            base64Length: base64Data.length
+        });
+        
+        return base64Data;
+        
+    } catch (error) {
+        console.warn('Failed to convert to RGB, falling back to PNG:', error);
+        // Fallback to PNG if JPEG conversion fails
+        return canvas.toDataURL('image/png').split(',')[1];
+    }
+}
+
+function getCurrentViewportBounds() {
+    // Get current viewport bounds following QuPath approach
+    if (!viewer) return null;
+    
+    const viewport = viewer.viewport;
+    const viewportBounds = viewport.getBounds();
+    
+    // Calculate downsample factor like QuPath does
+    // downsample = how many WSI pixels per canvas pixel
+    const zoom = viewport.getZoom();
+    const downsample = 1.0 / zoom; // QuPath approach: downsample factor
+    
+    // Convert normalized viewport bounds to WSI pixel coordinates
+    const wsiViewportBounds = {
+        x: viewportBounds.x * wsi_width,
+        y: viewportBounds.y * wsi_height,
+        width: viewportBounds.width * wsi_width,
+        height: viewportBounds.height * wsi_height,
+        downsample: downsample  // Add downsample factor like QuPath
+    };
+    
+    console.log('🔄 Current viewport bounds (QuPath style):', {
+        normalized: viewportBounds,
+        wsi: wsiViewportBounds,
+        zoom: zoom,
+        downsample: downsample
+    });
+    
+    return wsiViewportBounds;
+}
+
+function updateCurrentImageInfo() {
+    // Update the global imageInfo with current viewport state
+    if (!window.currentImageInfo || !viewer) return;
+    
+    const newViewportBounds = getCurrentViewportBounds();
+    if (newViewportBounds) {
+        window.currentImageInfo.viewportBounds = newViewportBounds;
+        console.log('📱 Updated imageInfo viewport bounds:', newViewportBounds);
+    }
+}
+
+function setupDynamicImageInfoUpdates() {
+    // Set up viewport change listeners to automatically update imageInfo
+    if (!viewer) return;
+    
+    console.log('🔧 Setting up dynamic imageInfo updates');
+    
+    // Listen for viewport changes (zoom, pan)
+    viewer.addHandler('zoom', updateCurrentImageInfo);
+    viewer.addHandler('pan', updateCurrentImageInfo);
+    viewer.addHandler('viewport-change', updateCurrentImageInfo);
+    
+    // Also update on animation events in case of smooth transitions
+    viewer.addHandler('animation-finish', updateCurrentImageInfo);
+    
+    console.log('✅ Dynamic imageInfo updates configured');
+}
+
+function transformCoordinatesToCanvasQuPathStyle(coords, imageInfo) {
+    // Transform coordinates properly accounting for OpenSeadragon vs QuPath differences
+    // OpenSeadragon: normalized viewport coordinates (0-1) 
+    // QuPath: pixel coordinates from full-resolution image
+    
+    if (!viewer || !imageInfo) {
+        console.error('Missing viewer or image info for coordinate transformation');
+        return coords;
+    }
+    
+    const viewport = viewer.viewport;
+    const currentImageInfo = window.currentImageInfo || imageInfo;
+    const viewportBounds = currentImageInfo.viewportBounds;
+    
+    console.log('🔄 Coordinate transformation (OpenSeadragon → Canvas):', {
+        inputCoords: coords,
+        coordType: 'Detecting coordinate type...',
+        canvasSize: { width: imageInfo.width, height: imageInfo.height }
+    });
+    
+    // Step 1: Detect coordinate type and convert to image pixel coordinates
+    let imagePixelCoords;
+    
+    if (coords.x >= 0 && coords.x <= 1 && coords.y >= 0 && coords.y <= 1) {
+        // Input is OpenSeadragon normalized viewport coordinates (0-1)
+        console.log('   📍 Detected: OpenSeadragon normalized viewport coordinates');
+        
+        // Convert viewport coordinates to image coordinates using OpenSeadragon method
+        const viewportPoint = new OpenSeadragon.Point(coords.x, coords.y);
+        const imagePoint = viewport.viewportToImageCoordinates(viewportPoint);
+        
+        imagePixelCoords = {
+            x: imagePoint.x,
+            y: imagePoint.y
+        };
+        
+        console.log('   📍 Converted to image pixels:', imagePixelCoords);
+        
+    } else {
+        // Input is already in image pixel coordinates (QuPath style)
+        console.log('   📍 Detected: Image pixel coordinates (QuPath style)');
+        imagePixelCoords = { x: coords.x, y: coords.y };
+    }
+    
+    // Step 2: Now apply QuPath-style canvas transformation
+    // The captured canvas represents a scaled-down version of the current viewport
+    // We need to map from full image coordinates to canvas coordinates
+    
+    if (!viewportBounds || !viewportBounds.downsample) {
+        console.error('Missing viewport bounds or downsample factor');
+        return coords;
+    }
+    
+    const downsample = viewportBounds.downsample;
+    const xOffset = viewportBounds.x;
+    const yOffset = viewportBounds.y;
+    
+    console.log('   📍 QuPath-style transformation parameters:', {
+        downsample: downsample,
+        offset: { x: xOffset, y: yOffset },
+        viewportBounds: viewportBounds
+    });
+    
+    let transformedCoords;
+    
+    if (coords.type === 'point') {
+        // Point transformation: (point - offset) / downsample
+        const canvasX = Math.floor((coords.x - xOffset) / downsample);
+        const canvasY = Math.floor((coords.y - yOffset) / downsample);
+        
+        transformedCoords = {
+            type: coords.type,
+            x: canvasX,
+            y: canvasY
+        };
+        
+        // Ensure within canvas bounds
+        transformedCoords.x = Math.max(0, Math.min(imageInfo.width - 1, transformedCoords.x));
+        transformedCoords.y = Math.max(0, Math.min(imageInfo.height - 1, transformedCoords.y));
+        
+    } else if (coords.type === 'rect') {
+        // Rectangle transformation: each corner transformed separately
+        const x1_canvas = Math.floor((coords.x - xOffset) / downsample);
+        const y1_canvas = Math.floor((coords.y - yOffset) / downsample);
+        const x2_canvas = Math.floor(((coords.x + coords.width) - xOffset) / downsample);
+        const y2_canvas = Math.floor(((coords.y + coords.height) - yOffset) / downsample);
+        
+        transformedCoords = {
+            type: coords.type,
+            x: x1_canvas,
+            y: y1_canvas,
+            width: x2_canvas - x1_canvas,
+            height: y2_canvas - y1_canvas
+        };
+        
+        // Ensure within canvas bounds
+        transformedCoords.x = Math.max(0, Math.min(imageInfo.width - 1, transformedCoords.x));
+        transformedCoords.y = Math.max(0, Math.min(imageInfo.height - 1, transformedCoords.y));
+        transformedCoords.width = Math.max(1, Math.min(imageInfo.width - transformedCoords.x, transformedCoords.width));
+        transformedCoords.height = Math.max(1, Math.min(imageInfo.height - transformedCoords.y, transformedCoords.height));
+    }
+    
+    console.log('✅ QuPath-style transformation result:', transformedCoords);
+    return transformedCoords;
+}
+
+function transformCoordinatesToViewport(coords, imageInfo) {
+    // Legacy function - redirect to QuPath style
+    return transformCoordinatesToCanvasQuPathStyle(coords, imageInfo);
+}
+
+function transformCanvasCoordinatesToWSIQuPathStyle(canvasCoordinates, imageInfo) {
+    // Transform coordinates from canvas space back to WSI space using QuPath approach
+    // This follows the reverse of Utils.getCoordinates() and applies AffineTransform logic
+    
+    console.log('🔄 QuPath-style reverse transformation (Canvas → WSI):', {
+        canvasCoordinates: canvasCoordinates,
+        coordinatesType: typeof canvasCoordinates,
+        isArray: Array.isArray(canvasCoordinates),
+        length: canvasCoordinates?.length,
+        firstElement: canvasCoordinates?.[0]
+    });
+    
+    if (!canvasCoordinates || !Array.isArray(canvasCoordinates)) {
+        console.error('❌ Invalid canvas coordinates:', canvasCoordinates);
+        return null;
+    }
+    
+    const viewport = viewer.viewport;
+    const currentImageInfo = window.currentImageInfo || imageInfo;
+    const viewportBounds = currentImageInfo.viewportBounds;
+    
+    if (!viewportBounds || !viewportBounds.downsample) {
+        console.error('Missing viewport bounds or downsample factor for reverse transformation');
+        return null;
+    }
+    
+    // QuPath reverse transformation: canvasCoord * downsample + offset
+    const downsample = viewportBounds.downsample;
+    const xOffset = viewportBounds.x;
+    const yOffset = viewportBounds.y;
+    
+    console.log('🔄 QuPath reverse transformation parameters:', {
+        downsample: downsample,
+        offset: { x: xOffset, y: yOffset },
+        viewportBounds: viewportBounds
+    });
+    
+    function transformCoordinate(coord) {
+        if (!Array.isArray(coord) || coord.length < 2) {
+            console.error('❌ Invalid coordinate:', coord);
+            return [0, 0];
+        }
+        
+        const [canvasX, canvasY] = coord;
+        
+        // QuPath reverse: imageCoord = canvasCoord * downsample + offset  
+        const imageX = canvasX * downsample + xOffset;
+        const imageY = canvasY * downsample + yOffset;
+        
+        console.log('🔄 Coordinate reverse transformation:', {
+            canvas: { x: canvasX, y: canvasY },
+            wsiPixels: { x: imageX, y: imageY }
+        });
+        
+        // Return WSI pixel coordinates for display (matches manual annotation system)
+        return [imageX, imageY];
+    }
+    
+    try {
+        // Handle nested coordinate arrays (polygon structures)
+        if (canvasCoordinates.length > 0 && Array.isArray(canvasCoordinates[0])) {
+            if (canvasCoordinates[0].length > 0 && Array.isArray(canvasCoordinates[0][0])) {
+                // Double-nested: [[ring1], [ring2], ...]
+                console.log('🔄 Processing multi-ring polygon');
+                return canvasCoordinates.map(ring => 
+                    ring.map(coord => transformCoordinate(coord))
+                );
+            } else {
+                // Single-nested: [coord1, coord2, ...]
+                console.log('🔄 Processing simple polygon');
+                return canvasCoordinates.map(coord => transformCoordinate(coord));
+            }
+        } else {
+            console.error('❌ Unexpected coordinate structure:', canvasCoordinates);
+            return null;
+        }
+    } catch (error) {
+        console.error('❌ Error in QuPath reverse coordinate transformation:', error);
+        return null;
+    }
+}
+
+function debugCoordinatePipeline(userClickPoint, imageInfo) {
+    // Comprehensive debugging of the entire coordinate transformation pipeline
+    console.log('\n🔬 === COORDINATE TRANSFORMATION PIPELINE DEBUG ===');
+    
+    // Step 1: Analyze user input
+    console.log('📍 1. USER INPUT:');
+    console.log('   User clicked at:', userClickPoint);
+    
+    // Step 2: Analyze current viewport state
+    const viewport = viewer.viewport;
+    const currentBounds = viewport.getBounds();
+    const zoom = viewport.getZoom();
+    const containerSize = viewport.getContainerSize();
+    
+    console.log('📍 2. VIEWPORT STATE:');
+    console.log('   Viewport bounds (normalized):', currentBounds);
+    console.log('   Zoom level:', zoom);
+    console.log('   Container size (pixels):', containerSize);
+    
+    // Step 3: Convert user click to WSI coordinates (if it's in viewport coords)
+    let wsiUserClick;
+    if (userClickPoint.x >= 0 && userClickPoint.x <= 1 && userClickPoint.y >= 0 && userClickPoint.y <= 1) {
+        // User click is in normalized viewport coordinates
+        wsiUserClick = {
+            x: userClickPoint.x * wsi_width,
+            y: userClickPoint.y * wsi_height
+        };
+        console.log('📍 3. USER CLICK → WSI:');
+        console.log('   Normalized click → WSI coordinates:', wsiUserClick);
+    } else {
+        // User click is already in WSI coordinates
+        wsiUserClick = userClickPoint;
+        console.log('📍 3. USER CLICK (already WSI):', wsiUserClick);
+    }
+    
+    // Step 4: Transform WSI coordinates to canvas coordinates for SAM API
+    const canvasCoords = transformCoordinatesToCanvasQuPathStyle(
+        { type: 'point', x: wsiUserClick.x, y: wsiUserClick.y }, 
+        imageInfo
+    );
+    
+    console.log('📍 4. WSI → CANVAS (for SAM API):');
+    console.log('   WSI coordinates:', { x: wsiUserClick.x, y: wsiUserClick.y });
+    console.log('   Canvas coordinates:', canvasCoords);
+    console.log('   Canvas size:', { width: imageInfo.width, height: imageInfo.height });
+    console.log('   Downsample factor:', imageInfo.viewportBounds?.downsample);
+    
+    // Step 5: Simulate SAM response and reverse transformation
+    console.log('📍 5. SIMULATION - SAM RESPONSE → WSI:');
+    console.log('   Simulating SAM returns canvas coords:', [canvasCoords.x, canvasCoords.y]);
+    
+    const reversedWSI = transformCanvasCoordinatesToWSIQuPathStyle(
+        [[[canvasCoords.x, canvasCoords.y]]],
+        imageInfo
+    );
+    
+    console.log('   Reverse transformation result:', reversedWSI);
+    
+    // Step 6: Convert final WSI coordinates back to viewport coordinates for display
+    if (reversedWSI && reversedWSI[0] && reversedWSI[0][0]) {
+        const finalWSI = reversedWSI[0][0];
+        const viewportForDisplay = {
+            x: finalWSI[0] / wsi_width,
+            y: finalWSI[1] / wsi_height
+        };
+        
+        console.log('📍 6. FINAL WSI → VIEWPORT (for display):');
+        console.log('   Final WSI coordinates:', finalWSI);
+        console.log('   Viewport coordinates for display:', viewportForDisplay);
+        
+        // Check if it's within current viewport bounds
+        const withinViewport = 
+            viewportForDisplay.x >= currentBounds.x && 
+            viewportForDisplay.x <= (currentBounds.x + currentBounds.width) &&
+            viewportForDisplay.y >= currentBounds.y && 
+            viewportForDisplay.y <= (currentBounds.y + currentBounds.height);
+            
+        console.log('   Within current viewport?', withinViewport ? '✅ YES' : '❌ NO');
+        
+        if (!withinViewport) {
+            console.log('   🚨 ANNOTATION WILL NOT BE VISIBLE - outside viewport!');
+            console.log('   Current viewport bounds:', currentBounds);
+            console.log('   Annotation viewport coords:', viewportForDisplay);
+        }
+    }
+    
+    console.log('🔬 === END COORDINATE PIPELINE DEBUG ===\n');
+}
+
+async function debugWriteImageData(base64ImageData, imageInfo) {
+    try {
+        console.log('🐛 DEBUG: Writing image data to PNG file for inspection...');
+        
+        // Create a timestamp for unique filename
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').split('.')[0];
+        const filename = `debug-sam-image-${timestamp}.png`;
+        
+        // Convert base64 to binary data
+        const binaryString = atob(base64ImageData);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        
+        // Create blob and download
+        const blob = new Blob([bytes], { type: 'image/png' });
+        const url = URL.createObjectURL(blob);
+        
+        // Create download link
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        
+        console.log(`🐛 DEBUG: Image data written to ${filename}`, {
+            imageDataLength: base64ImageData.length,
+            width: imageInfo.width,
+            height: imageInfo.height,
+            longSide: imageInfo.longSide,
+            fileSize: bytes.length
+        });
+        
+        // Also log the first few characters of base64 for validation
+        console.log('🐛 DEBUG: Base64 preview:', base64ImageData.substring(0, 100) + '...');
+        
+    } catch (error) {
+        console.error('🐛 DEBUG: Failed to write image data:', error);
+    }
+}
+
+function convertSAMResultToAnnotation(samResult, originalAnnotation, imageInfo) {
+    // Convert SAM API response to annotation format
+    // Handle various possible SAM API response formats
+    
+    if (!samResult) {
+        console.warn('No SAM result to process');
+        return null;
+    }
+    
+    console.log('🔄 Converting SAM result to annotation:', samResult);
+    
+    try {
+        let features = [];
+        
+        // Handle SAM API response format - array of mask features
+        if (Array.isArray(samResult)) {
+            console.log('📋 Detected SAM array format with', samResult.length, 'masks');
+            
+            // SAM API returns array of mask objects with geometry and properties
+            features = samResult.map(mask => {
+                console.log('📋 Processing SAM mask:', mask);
+                
+                if (mask.geometry && mask.properties) {
+                    // Standard SAM response format
+                    return {
+                        type: 'Feature',
+                        geometry: mask.geometry,
+                        properties: {
+                            quality: mask.properties.quality || 0.5,
+                            sam_model: mask.properties.sam_model || 'mobile-sam',
+                            object_idx: mask.properties.object_idx || 0
+                        }
+                    };
+                } else if (mask.type === 'Feature') {
+                    // Already in feature format
+                    return mask;
+                } else {
+                    console.warn('❌ Unexpected mask format:', mask);
+                    return null;
+                }
+            }).filter(f => f !== null);
+            
+        } else if (samResult.features && Array.isArray(samResult.features)) {
+            // GeoJSON FeatureCollection format
+            console.log('📋 Detected GeoJSON FeatureCollection format');
+            features = samResult.features;
+            
+        } else if (samResult.type === 'Feature') {
+            // Single GeoJSON Feature
+            console.log('📋 Detected single GeoJSON Feature format');
+            features = [samResult];
+            
+        } else if (samResult.geometry) {
+            // Single geometry object
+            console.log('📋 Detected single geometry object format');
+            features = [{
+                type: 'Feature',
+                geometry: samResult.geometry,
+                properties: samResult.properties || { quality: 0.5, sam_model: 'mobile-sam' }
+            }];
+            
+        } else {
+            console.error('❌ Unsupported SAM response format. Keys found:', Object.keys(samResult));
+            console.error('❌ Full response:', samResult);
+            alert('SAM response format not recognized. Check console for details.');
+            return null;
+        }
+        
+        if (features.length === 0) {
+            console.warn('No features found in SAM result');
+            return null;
+        }
+        
+        // Calculate area for each feature and sort by smallest area
+        features.forEach(feature => {
+            if (feature.geometry && feature.geometry.coordinates && feature.geometry.coordinates[0]) {
+                const coords = feature.geometry.coordinates[0];
+                feature.calculatedArea = calculatePolygonArea(coords);
+            } else {
+                feature.calculatedArea = Infinity; // Invalid features get max area
+            }
+        });
+        
+        // Sort features by smallest area first
+        features.sort((a, b) => a.calculatedArea - b.calculatedArea);
+        const bestFeature = features[0];
+        
+        console.log('📋 Selected smallest feature:', {
+            quality: bestFeature.properties?.quality,
+            area: bestFeature.calculatedArea?.toFixed(2),
+            geometryType: bestFeature.geometry?.type,
+            coordinatesLength: bestFeature.geometry?.coordinates?.length,
+            totalFeatures: features.length
+        });
+        
+        if (!bestFeature.geometry || !bestFeature.geometry.coordinates) {
+            console.error('❌ No geometry found in SAM feature:', bestFeature);
+            return null;
+        }
+        
+        // SAM returns canvas coordinates relative to the viewport image
+        // Transform these canvas coordinates back to WSI coordinates for display
+        console.log('🎯 Transforming SAM canvas coordinates to WSI coordinates');
+        const wsiCoordinatesForDisplay = transformCanvasCoordinatesToWSIQuPathStyle(
+            bestFeature.geometry.coordinates, 
+            imageInfo
+        );
+        
+        if (!wsiCoordinatesForDisplay) {
+            console.error('❌ Failed to transform SAM coordinates to WSI');
+            return null;
+        }
+        
+        console.log('🎯 Final WSI coordinates for display:', {
+            firstCoord: wsiCoordinatesForDisplay[0]?.[0],
+            coordinateRange: {
+                x: `${Math.min(...wsiCoordinatesForDisplay[0].map(c => c[0]))} - ${Math.max(...wsiCoordinatesForDisplay[0].map(c => c[0]))}`,
+                y: `${Math.min(...wsiCoordinatesForDisplay[0].map(c => c[1]))} - ${Math.max(...wsiCoordinatesForDisplay[0].map(c => c[1]))}`
+            }
+        });
+        
+        const svgPath = createSVGPathFromWSICoordinates(wsiCoordinatesForDisplay);
+        const annotoriousAnnotation = {
+            ...originalAnnotation,
+            id: 'sam-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9),
+            target: {
+                ...originalAnnotation.target,
+                selector: {
+                    type: 'SvgSelector',
+                    value: svgPath
+                }
+            },
+            body: [
+                {
+                    type: 'TextualBody',
+                    value: `SAM Generated (${(bestFeature.properties?.quality || 0).toFixed(2)})`
+                }
+            ],
+            // Store annotation data for export in the example format
+            samGenerated: true,
+            samQuality: bestFeature.properties?.quality || 0,
+            samModel: bestFeature.properties?.sam_model || 'mobile-sam',
+            // Store WSI coordinates for export (same as display coordinates)
+            wsiGeometry: {
+                type: bestFeature.geometry.type,
+                coordinates: wsiCoordinatesForDisplay
+            }
+        };
+        
+        console.log('✅ SAM annotation converted successfully:', {
+            id: annotoriousAnnotation.id,
+            hasTarget: !!annotoriousAnnotation.target,
+            hasSelector: !!annotoriousAnnotation.target?.selector,
+            selectorType: annotoriousAnnotation.target?.selector?.type,
+            svgLength: annotoriousAnnotation.target?.selector?.value?.length,
+            samGenerated: annotoriousAnnotation.samGenerated
+        });
+        console.log('🔍 Full SAM annotation:', annotoriousAnnotation);
+        
+        return annotoriousAnnotation;
+        
+    } catch (error) {
+        console.error('❌ Error converting SAM result:', error);
+        return null;
+    }
+}
+
+function transformNormalizedCoordinatesToWSI(normalizedCoordinates, imageInfo) {
+    // Transform coordinates from normalized (0-1) space back to WSI coordinate space
+    // SAM returns normalized coordinates relative to the 1024px canvas viewport
+    if (!normalizedCoordinates || !Array.isArray(normalizedCoordinates)) {
+        console.error('❌ Invalid normalized coordinates:', normalizedCoordinates);
+        return null;
+    }
+    
+    const viewport = viewer.viewport;
+    // Use dynamically updated imageInfo if available, fallback to passed imageInfo
+    const currentImageInfo = window.currentImageInfo || imageInfo;
+    const viewportBounds = currentImageInfo.viewportBounds;
+    
+    console.log('🔄 Transforming normalized coordinates to WSI:', {
+        normalizedCoordinates: normalizedCoordinates,
+        coordinatesType: typeof normalizedCoordinates,
+        isArray: Array.isArray(normalizedCoordinates),
+        length: normalizedCoordinates?.length,
+        firstElement: normalizedCoordinates?.[0],
+        imageInfo: {
+            width: imageInfo.width,
+            height: imageInfo.height,
+            scale: imageInfo.scale
+        },
+        viewportBounds: viewportBounds
+    });
+    
+    function transformCoordinate(coord) {
+        if (!Array.isArray(coord) || coord.length < 2) {
+            console.error('❌ Invalid coordinate:', coord);
+            return [0, 0];
+        }
+        
+        const [normalizedX, normalizedY] = coord;
+        
+        // Step 1: Convert normalized coordinates (0-1) to canvas pixel coordinates (1024px)
+        // The normalized coordinates are relative to the captured canvas (imageInfo.width x imageInfo.height)
+        const canvasX = normalizedX * imageInfo.width;
+        const canvasY = normalizedY * imageInfo.height;
+        
+        // Step 2: Convert canvas pixel coordinates back to WSI coordinates
+        // This reverses the scaling operation: WSI -> normalized viewport -> canvas pixels
+        // We need to map canvas pixels back to the viewport bounds in WSI space
+        const wsiX = viewportBounds.x + (normalizedX / imageInfo.width) * viewportBounds.width;
+        const wsiY = viewportBounds.y + (normalizedY / imageInfo.height) * viewportBounds.height;
+        
+        // console.log('🔄 Coordinate transformation step-by-step:', {
+        //     input: coord,
+        //     normalized: { x: normalizedX, y: normalizedY },
+        //     canvas: { x: canvasX, y: canvasY },
+        //     wsi: { x: wsiX, y: wsiY }
+        // });
+        
+        return [wsiX, wsiY];
+    }
+    
+    try {
+        // Check if we have nested arrays (polygon with rings)
+        if (normalizedCoordinates.length > 0 && Array.isArray(normalizedCoordinates[0])) {
+            // Check if it's double-nested (rings) or single-nested (simple polygon)
+            if (normalizedCoordinates[0].length > 0 && Array.isArray(normalizedCoordinates[0][0])) {
+                // Double-nested: [[ring1], [ring2], ...]
+                console.log('🔄 Processing multi-ring polygon from normalized coordinates');
+                return normalizedCoordinates.map(ring => 
+                    ring.map(coord => transformCoordinate(coord))
+                );
+            } else {
+                // Single-nested: [coord1, coord2, ...]
+                console.log('🔄 Processing simple polygon from normalized coordinates');
+                return normalizedCoordinates.map(coord => transformCoordinate(coord));
+            }
+        } else {
+            console.error('❌ Unexpected coordinate structure:', normalizedCoordinates);
+            return null;
+        }
+    } catch (error) {
+        console.error('❌ Error transforming normalized coordinates:', error);
+        return null;
+    }
+}
+
+function transformCanvasCoordinatesToWSI(canvasCoordinates, imageInfo) {
+    // Transform coordinates from canvas space (1024px) back to WSI coordinate space
+    console.log('🔄 Transforming canvas coordinates to WSI:', {
+        canvasCoordinates: canvasCoordinates,
+        coordinatesType: typeof canvasCoordinates,
+        isArray: Array.isArray(canvasCoordinates),
+        length: canvasCoordinates?.length,
+        firstElement: canvasCoordinates?.[0]
+    });
+    
+    if (!canvasCoordinates || !Array.isArray(canvasCoordinates)) {
+        console.error('❌ Invalid canvas coordinates:', canvasCoordinates);
+        return null;
+    }
+    
+    const viewport = viewer.viewport;
+    // Use dynamically updated imageInfo if available, fallback to passed imageInfo
+    const currentImageInfo = window.currentImageInfo || imageInfo;
+    const viewportBounds = currentImageInfo.viewportBounds;
+    
+    function transformCoordinate(coord) {
+        if (!Array.isArray(coord) || coord.length < 2) {
+            console.error('❌ Invalid coordinate:', coord);
+            return [0, 0];
+        }
+        
+        const [x, y] = coord;
+        
+        // Convert canvas pixels to normalized coordinates (0-1)
+        const normalizedX = x / imageInfo.width;
+        const normalizedY = y / imageInfo.height;
+        
+        // Convert normalized coordinates to WSI coordinates
+        const wsiX = viewportBounds.x + (normalizedX * viewportBounds.width);
+        const wsiY = viewportBounds.y + (normalizedY * viewportBounds.height);
+        
+        return [wsiX, wsiY];
+    }
+    
+    try {
+        // Check if we have nested arrays (polygon with rings)
+        if (canvasCoordinates.length > 0 && Array.isArray(canvasCoordinates[0])) {
+            // Check if it's double-nested (rings) or single-nested (simple polygon)
+            if (canvasCoordinates[0].length > 0 && Array.isArray(canvasCoordinates[0][0])) {
+                // Double-nested: [[ring1], [ring2], ...]
+                console.log('🔄 Processing multi-ring polygon');
+                return canvasCoordinates.map(ring => 
+                    ring.map(coord => transformCoordinate(coord))
+                );
+            } else {
+                // Single-nested: [coord1, coord2, ...]
+                console.log('🔄 Processing simple polygon');
+                return [canvasCoordinates.map(coord => transformCoordinate(coord))];
+            }
+        } else {
+            // Flat array or other format
+            console.error('❌ Unexpected coordinate structure:', canvasCoordinates);
+            return null;
+        }
+    } catch (error) {
+        console.error('❌ Error transforming coordinates:', error);
+        return null;
+    }
+}
+
+function createSVGPathFromCoordinates(coordinates) {
+    // Create SVG path for Annotorious display (uses canvas coordinates)
+    const coords = Array.isArray(coordinates[0][0]) ? coordinates[0] : coordinates;
+    
+    let pathData = '';
+    coords.forEach((coord, index) => {
+        const [x, y] = coord;
+        pathData += (index === 0 ? `M ${x} ${y}` : ` L ${x} ${y}`);
+    });
+    pathData += ' Z'; // Close path
+    
+    return `<svg><path d="${pathData}" /></svg>`;
+}
+
+function createSVGPathFromWSICoordinates(wsiCoordinates) {
+    // Create SVG path for Annotorious display using WSI coordinates
+    console.log('🎨 Creating SVG path from WSI coordinates:', wsiCoordinates);
+    
+    if (!wsiCoordinates || !Array.isArray(wsiCoordinates)) {
+        console.error('❌ Invalid WSI coordinates for SVG path:', wsiCoordinates);
+        return `<svg><circle cx="0" cy="0" r="10" /></svg>`; // Fallback
+    }
+    
+    // Handle nested coordinate arrays (polygon with rings)
+    let coords;
+    if (Array.isArray(wsiCoordinates[0])) {
+        if (Array.isArray(wsiCoordinates[0][0])) {
+            // Double nested - take first ring
+            coords = wsiCoordinates[0];
+        } else {
+            // Single nested - use as is
+            coords = wsiCoordinates;
+        }
+    } else {
+        console.error('❌ Unexpected coordinate structure for SVG:', wsiCoordinates);
+        return `<svg><circle cx="0" cy="0" r="10" /></svg>`; // Fallback
+    }
+    
+    if (!coords || coords.length === 0) {
+        console.error('❌ No valid coordinates for SVG path');
+        return `<svg><circle cx="0" cy="0" r="10" /></svg>`; // Fallback
+    }
+    
+    let pathData = '';
+    coords.forEach((coord, index) => {
+        if (!Array.isArray(coord) || coord.length < 2) {
+            console.warn('❌ Invalid coordinate in SVG path:', coord);
+            return;
+        }
+        const [x, y] = coord;
+        pathData += (index === 0 ? `M ${x} ${y}` : ` L ${x} ${y}`);
+    });
+    pathData += ' Z'; // Close path
+    
+    if (!pathData || pathData === ' Z') {
+        console.error('❌ Failed to create valid SVG path data');
+        return `<svg><circle cx="0" cy="0" r="10" /></svg>`; // Fallback
+    }
+    
+    const svgPath = `<svg><path d="${pathData}" /></svg>`;
+    console.log('🎨 Created SVG path:', svgPath);
+    
+    return svgPath;
+}
+
+// Initialize everything
+document.addEventListener('DOMContentLoaded', function() {
+    initializeFileInput();
+    initializeTabs();
+    setupKeyboardShortcuts();
+    setupContextMenu();
+    initializeSAMIntegration();
+});

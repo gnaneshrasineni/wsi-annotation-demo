@@ -1,8 +1,30 @@
 {
+  "name": "wsi-annotation-demo",
+  "version": "1.0.0",
+  "description": "Whole Slide Image Annotation Demo with TIFF support",
+  "main": "index.html",
   "dependencies": {
     "@annotorious/annotorious": "^3.0.11",
     "@annotorious/selector-pack": "^0.6.0",
-    "@recogito/annotorious-openseadragon": "^2.7.16",
-    "@recogito/annotorious-toolbar": "^1.1.0"
-  }
+    "@recogito/annotorious-openseadragon": "^2.7.17",
+    "@recogito/annotorious-toolbar": "^1.1.0",
+    "openseadragon": "^4.1.0",
+    "geotiff-tilesource": "^2.2.0",
+    "express": "^4.18.2",
+    "http-proxy-middleware": "^2.0.6"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "old-start": "python -m http.server 8000"
+  },
+  "keywords": [
+    "wsi",
+    "annotation",
+    "openseadragon",
+    "geotiff",
+    "medical-imaging"
+  ],
+  "author": "André Pedersen",
+  "license": "MIT"
 }

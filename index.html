@@ -7,32 +7,213 @@
     <link rel="stylesheet" href="css/styles.css">
     <!-- Dependencies -->
     <script src="node_modules/openseadragon/build/openseadragon/openseadragon.min.js"></script>
+    <script src="node_modules/geotiff-tilesource/dist/geotiff-tilesource.min.js"></script>
     <script src="node_modules/@recogito/annotorious-openseadragon/dist/openseadragon-annotorious.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@recogito/annotorious-toolbar@1.1.0/dist/annotorious-toolbar.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@recogito/annotorious-selector-pack@0.6.0/dist/annotorious-selector-pack.min.js"></script>
 </head>
 <body>
-    <div>
+    <div class="app-container">
         <div class="sidebar-left">
-            <h1>Whole Slide Image Annotation Demo</h1>
-            <hr>
-            <div id="annotations-container">
-                <h2>Annotations</h2>
-                <hr>
-                <div id="annotations-list"></div>
+            <h1>WSI Annotation</h1>
+            
+            <!-- Apple-style Tab Navigation -->
+            <div class="tab-container">
+                <div class="tab-nav-wrapper">
+                    <button class="tab-arrow tab-arrow-left" id="tab-arrow-left" disabled>
+                        <svg width="12" height="12" viewBox="0 0 12 12">
+                            <path d="M8 2 L4 6 L8 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                    <div class="tab-nav-container">
+                        <div class="tab-nav" id="tab-nav">
+                            <button class="tab-item active" data-tab="manual">Manual</button>
+                            <button class="tab-item" data-tab="sam">SAM</button>
+                        </div>
+                    </div>
+                    <button class="tab-arrow tab-arrow-right" id="tab-arrow-right">
+                        <svg width="12" height="12" viewBox="0 0 12 12">
+                            <path d="M4 2 L8 6 L4 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                </div>
+                
+                <!-- Tab Content -->
+                <div class="tab-content">
+                    <!-- Manual Tab -->
+                    <div class="tab-pane active" id="manual-pane">
+                        <div class="info-section">
+                            <p class="tab-info">Manual annotation tools</p>
+                        </div>
+                        
+                        <!-- Manual Tools Grid -->
+                        <div class="all-tools-grid">
+                            <button class="tool-button active" data-tool="drag" title="Drag & Zoom">
+                                <svg width="20" height="20" viewBox="0 0 20 20">
+                                    <path d="M10 2 L8 6 L12 6 Z M10 18 L8 14 L12 14 Z M2 10 L6 8 L6 12 Z M18 10 L14 8 L14 12 Z" fill="currentColor"/>
+                                    <circle cx="10" cy="10" r="2" fill="currentColor"/>
+                                </svg>
+                                <span class="tool-label">Drag</span>
+                            </button>
+                            
+                            <button class="tool-button" data-tool="circle" title="Circle">
+                                <svg width="20" height="20" viewBox="0 0 20 20">
+                                    <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2"/>
+                                </svg>
+                                <span class="tool-label">Circle</span>
+                            </button>
+                            
+                            <button class="tool-button" data-tool="point" title="Point Click">
+                                <svg width="20" height="20" viewBox="0 0 20 20">
+                                    <circle cx="10" cy="10" r="3" fill="currentColor"/>
+                                    <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2"/>
+                                </svg>
+                                <span class="tool-label">Point</span>
+                            </button>
+                            
+                            <button class="tool-button" data-tool="rect" title="Bounding Box">
+                                <svg width="20" height="20" viewBox="0 0 20 20">
+                                    <rect x="3" y="5" width="14" height="10" fill="none" stroke="currentColor" stroke-width="2"/>
+                                </svg>
+                                <span class="tool-label">Rectangle</span>
+                            </button>
+                            
+                            <button class="tool-button" data-tool="quadrilateral" title="Polyline">
+                                <svg width="20" height="20" viewBox="0 0 20 20">
+                                    <path d="M3 7 L16 3 L17 15 L6 17 Z" fill="none" stroke="currentColor" stroke-width="2"/>
+                                </svg>
+                                <span class="tool-label">Polyline</span>
+                            </button>
+                            
+                            <button class="tool-button" data-tool="freehand" title="Lasso">
+                                <svg width="20" height="20" viewBox="0 0 20 20">
+                                    <path d="M3 3 Q10 8, 17 3 Q12 10, 17 17 Q10 12, 3 17 Q8 10, 3 3 Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                                </svg>
+                                <span class="tool-label">Lasso</span>
+                            </button>
+                        </div>
+                        
+                        <!-- Polarity Section for Manual -->
+                        <div class="polarity-section">
+                            <button class="polarity-button positive" data-polarity="positive">+</button>
+                            <button class="polarity-button negative" data-polarity="negative">−</button>
+                        </div>
+                        
+                        <div class="annotations-section" id="manual-annotations-section">
+                            <!-- Dynamic folders will be created here -->
+                        </div>
+                    </div>
+
+                    <!-- SAM Tab -->
+                    <div class="tab-pane" id="sam-pane">
+                        <div class="info-section">
+                            <p class="tab-info">Segment Anything Model (Live Mode)</p>
+                        </div>
+                        
+                        <!-- SAM Configuration -->
+                        <div class="sam-config">
+                            <div class="config-group">
+                                <label for="sam-api-url">API URL:</label>
+                                <input type="text" id="sam-api-url" value="http://localhost:3000/api/sam" placeholder="SAM API URL">
+                            </div>
+                            <div class="config-group">
+                                <button id="sam-connect" class="connect-button">Connect</button>
+                                <span class="sam-status" id="sam-status">Disconnected</span>
+                            </div>
+                        </div>
+                        
+                        <!-- SAM Tools (drag, point click and bounding box) -->
+                        <div class="sam-tools-grid">
+                            <button class="tool-button active" data-tool="sam-drag" title="Drag & Zoom">
+                                <svg width="20" height="20" viewBox="0 0 20 20">
+                                    <path d="M10 2 L8 6 L12 6 Z M10 18 L8 14 L12 14 Z M2 10 L6 8 L6 12 Z M18 10 L14 8 L14 12 Z" fill="currentColor"/>
+                                    <circle cx="10" cy="10" r="2" fill="currentColor"/>
+                                </svg>
+                                <span class="tool-label">Drag</span>
+                            </button>
+                            
+                            <button class="tool-button" data-tool="sam-point" title="Point Click">
+                                <svg width="20" height="20" viewBox="0 0 20 20">
+                                    <circle cx="10" cy="10" r="3" fill="currentColor"/>
+                                    <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" stroke-width="2"/>
+                                </svg>
+                                <span class="tool-label">Point</span>
+                            </button>
+                            
+                            <button class="tool-button" data-tool="sam-rect" title="Bounding Box">
+                                <svg width="20" height="20" viewBox="0 0 20 20">
+                                    <rect x="3" y="5" width="14" height="10" fill="none" stroke="currentColor" stroke-width="2"/>
+                                </svg>
+                                <span class="tool-label">Rectangle</span>
+                            </button>
+                        </div>
+                        
+                        <!-- SAM Settings -->
+                        <div class="sam-settings">
+                            <div class="setting-group">
+                                <label for="sam-threshold">Confidence:</label>
+                                <input type="range" id="sam-threshold" min="0" max="1" step="0.1" value="0.5">
+                                <span id="threshold-value">0.5</span>
+                            </div>
+                            <div class="setting-group">
+                                <label>
+                                    <input type="checkbox" id="sam-live-mode" checked>
+                                    Live Mode
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <!-- SAM Polarity Section -->
+                        <div class="polarity-section">
+                            <button class="polarity-button positive" data-polarity="positive">+</button>
+                            <button class="polarity-button negative" data-polarity="negative">−</button>
+                        </div>
+                        
+                        <!-- Reference to shared annotations section -->
+                        <div class="annotations-section" id="sam-annotations-section">
+                            <!-- This will reference the same shared annotations -->
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
-        <div id="wsi-canvas"></div>
-        <div id="annotation-toolbar"></div>
-        <div class="sidebar-right">
-            <h2>View tracking information</h2>
-            <hr>
-            <div class="position"></div>
-            <hr>
-            <div class="zoom"></div>
+        
+        <div id="wsi-canvas">
+            <!-- File browser interface -->
+            <div id="file-browser" class="file-browser">
+                <div class="file-browser-content">
+                    <div class="file-browser-icon">📁</div>
+                    <h2>Load TIFF or SVS File</h2>
+                    <p>Select a pyramid TIFF (.tiff/.tif) or SVS (.svs) file</p>
+                    <button id="browse-button" class="browse-button">Browse Files</button>
+                    <p class="file-drop-text">or drag and drop here</p>
+                    <input type="file" id="file-input" accept=".tiff,.tif,.svs" style="display: none;">
+                    <div id="file-info" class="file-info"></div>
+                </div>
+            </div>
+            <!-- Loading indicator -->
+            <div id="loading-indicator" class="loading-indicator" style="display: none;">
+                <div class="loading-spinner"></div>
+                <p>Loading image...</p>
+            </div>
         </div>
-        <div id="annotation_list" style="display: none;"></div>
+        
+        <!-- Hidden annotation toolbar -->
+        <div id="annotation-toolbar" style="display: none;"></div>
+        
+        <div class="sidebar-right">
+            <h2>View Info</h2>
+            <div class="info-section">
+                <div class="position"></div>
+                <div class="zoom"></div>
+            </div>
+        </div>
     </div>
-    <script type="text/javascript" src="js/viewer.js"></script>
+    <!-- Modular JavaScript Files -->
+    <script type="text/javascript" src="js/modules/coordinate-transforms.js"></script>
+    <script type="text/javascript" src="js/modules/annotation-manager.js"></script>
+    <script type="text/javascript" src="js/modules/sam-api.js"></script>
+    <script type="text/javascript" src="js/core/viewer-core.js"></script>
+    <script type="text/javascript" src="js/main.js"></script>
 </body>
 </html>
